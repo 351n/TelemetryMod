@@ -29,8 +29,7 @@ data:extend({
     setting_type = "runtime-global",
     default_value = false,
     order = "d"
-  }
-  ,
+  },
   {
     type = "int-setting",
     name = "telemetry-max-bytes",
@@ -48,5 +47,52 @@ data:extend({
     minimum_value = 1,
     maximum_value = 31536000,
     order = "f"
+  },
+  {
+    type = "bool-setting",
+    name = "telemetry-evolution-enabled",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "e-a"
+  },
+  {
+    type = "int-setting",
+    name = "telemetry-evolution-interval-seconds",
+    setting_type = "runtime-global",
+    default_value = 10,
+    minimum_value = 1,
+    maximum_value = 3600,
+    order = "e-b"
+  },
+  {
+    type = "double-setting",
+    name = "telemetry-evolution-min-delta",
+    setting_type = "runtime-global",
+    default_value = 0.01,
+    minimum_value = 0,
+    maximum_value = 1,
+    order = "e-c"
+  },
+  {
+    type = "bool-setting",
+    name = "telemetry-evolution-include-dominance",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "e-d"
+  },
+  {
+    type = "bool-setting",
+    name = "telemetry-evolution-notify-chat",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "e-e"
+  },
+  {
+    type = "string-setting",
+    name = "telemetry-evolution-force-name",
+    setting_type = "runtime-global",
+    default_value = "enemy",
+    allow_blank = false,
+    order = "e-f"
   }
 })
