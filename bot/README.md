@@ -27,6 +27,8 @@ Events mapping
 - afk   -> keeps per-player AFK state and emits transitions only:
   - `afk_seconds >= AFK_ON_SECONDS` and previously not AFK -> 💬 "💤 <player> AFK"
   - `afk_seconds <= AFK_OFF_SECONDS` and previously AFK -> 🔔 "🔔 <player> wrócił z AFK"
+- evolution threshold -> 🧬 informacje o progach ewolucji tylko wtedy, gdy pojawiają się nowe typy przeciwników lub zmiany dominanty
+  - relay ignoruje inne progi (np. znikanie małych biterów) oraz zdarzenia "down"
 
 Quiet hours and pings
 - Controlled by `TIMEZONE`, `QUIET_HOURS_START` and `QUIET_HOURS_END` (supports intervals crossing midnight).
