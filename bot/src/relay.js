@@ -123,7 +123,19 @@ const EVOLUTION_NEW_TYPE_KEYS = new Set([
   'medium_worm',
   'medium_spitter',
   'big_biter_spitter_worm',
-  'behemoth'
+  'behemoth',
+  'tier_1',
+  'tier_2',
+  'tier_3',
+  'tier_4',
+  'tier_5',
+  'tier_6',
+  'tier_7',
+  'tier_8',
+  'tier_9',
+  'tier_10',
+  'tier_10_50',
+  'tier_10_75'
 ]);
 
 function formatEvolutionPercent(value) {
@@ -138,7 +150,8 @@ function shouldNotifyEvolutionThreshold(obj) {
   const kind = obj.threshold_kind;
   if (kind === 'dominance') return true;
   if (kind === 'tier') {
-    return EVOLUTION_NEW_TYPE_KEYS.has(obj.threshold_key);
+    const key = obj.threshold_key ? String(obj.threshold_key) : '';
+    return EVOLUTION_NEW_TYPE_KEYS.has(key) || key.startsWith('tier_');
   }
   return false;
 }
