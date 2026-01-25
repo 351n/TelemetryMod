@@ -388,7 +388,9 @@ local function ensure_evolution_state()
   if not global then return nil end
   global.telemetry_evolution = global.telemetry_evolution or {
     last_checked_factor = nil,
-    last_logged_factor = nil
+    last_logged_factor = nil,
+    unlogged_delta = 0,
+    prev_poll_factor = nil
   }
   return global.telemetry_evolution
 end
@@ -434,25 +436,33 @@ local function evolution_poll(event)
   if not EVOLUTION_ENABLED then return end
 
   local force_obj = get_observed_force()
-  if not (force_obj and force_obj.valid) then return end
-
-  local current = tonumber(get_force_evolution_factor(force_obj, EVOLUTION_SURFACE_NAME)) or 0
+  local raw_current = get_force_evolution_factor(force_obj, EVOLUTION_SURFACE_NAME)
+  local current = tonumber(raw_current) or 0
   local st = ensure_evolution_state()
   if not st then return end
 
   local last_checked = st.last_checked_factor
   if last_checked == nil then last_checked = current end
 
-  -- Log periodic evolution changes (so external tools can graph it)
-  local last_logged = st.last_logged_factor
-  if last_logged == nil then last_logged = current end
-  local delta = current - last_logged
-  if math.abs(delta) >= (tonumber(EVOLUTION_MIN_DELTA) or 0) then
+  -- Accumulate small changes between logs to avoid dropping slow evolution drift.
+  st.unlogged_delta = st.unlogged_delta or 0
+  local prev_poll = st.prev_poll_factor
+  if prev_poll == nil then prev_poll = last_checked or current end
+  local delta_since_prev = current - prev_poll
+  st.prev_poll_factor = current
+  st.unlogged_delta = st.unlogged_delta + delta_since_prev
+
+  local min_delta = tonumber(EVOLUTION_MIN_DELTA) or 0
+
+  if math.abs(st.unlogged_delta) >= min_delta then
     write_evolution_telemetry_line(game.tick, "poll", force_obj.name, current, {
-      delta = delta,
+      delta = st.unlogged_delta,
       include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
     })
     st.last_logged_factor = current
+    st.unlogged_delta = 0
+  else
+    safe_log("evolution_poll: accumulated delta below threshold — skipping poll log")
   end
 
   -- Threshold crossing detection
@@ -998,6 +1008,8 @@ script.on_init(function()
       local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
       global.telemetry_evolution.last_checked_factor = current
       global.telemetry_evolution.last_logged_factor = current
+      global.telemetry_evolution.unlogged_delta = 0
+      global.telemetry_evolution.prev_poll_factor = current
       write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, current, {
         include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
       })
@@ -1094,10 +1106,12 @@ apply_settings = function()
     pcall(function()
       local f = get_observed_force()
       if f and f.valid then
-        global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
+        global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil, unlogged_delta = 0, prev_poll_factor = nil }
         local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
         global.telemetry_evolution.last_checked_factor = current
         global.telemetry_evolution.last_logged_factor = current
+        global.telemetry_evolution.unlogged_delta = 0
+        global.telemetry_evolution.prev_poll_factor = current
         write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, current, {
           include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
         })
