@@ -117,6 +117,45 @@ function isQuietNow() {
 const dedupMap = new Map();
 const DEDUP_SECONDS = 10;
 
+const EVOLUTION_NEW_TYPE_KEYS = new Set([
+  'medium_biter',
+  'small_spitter',
+  'medium_worm',
+  'medium_spitter',
+  'big_biter_spitter_worm',
+  'behemoth',
+  'tier_1',
+  'tier_2',
+  'tier_3',
+  'tier_4',
+  'tier_5',
+  'tier_6',
+  'tier_7',
+  'tier_8',
+  'tier_9',
+  'tier_10',
+  'tier_10_50',
+  'tier_10_75'
+]);
+
+function formatEvolutionPercent(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return (Math.round(num * 1000) / 10).toFixed(1);
+}
+
+function shouldNotifyEvolutionThreshold(obj) {
+  if (!obj || obj.trigger !== 'threshold') return false;
+  if (obj.direction && obj.direction !== 'up') return false;
+  const kind = obj.threshold_kind;
+  if (kind === 'dominance') return true;
+  if (kind === 'tier') {
+    const key = obj.threshold_key ? String(obj.threshold_key) : '';
+    return EVOLUTION_NEW_TYPE_KEYS.has(key) || key.startsWith('tier_');
+  }
+  return false;
+}
+
 async function postToDiscord(content, severity = 'info') {
   const now = Date.now();
   const last = dedupMap.get(content) || 0;
@@ -238,10 +277,17 @@ function handleEvent(obj) {
       const tech = techLocalised || obj.technology || obj.technology_name || obj.research || '';
       const techName = tech || 'nieznana technologia';
       const force = obj.force || '';
-      const by = obj.player ? `${obj.player} ` : '';
-      const who = force || by || '';
-      const content = who ? `🔬 ${who} odkrył ${techName}` : `🔬 Odkryto ${techName}`;
+      const content = force
+        ? `🔬 ${force} odkrył ${techName}`
+        : `🔬 Odkryto ${techName}`;
       postToDiscord(content, 'info').catch(() => { });
+    } else if (t === 'evolution') {
+      if (!shouldNotifyEvolutionThreshold(obj)) return;
+      const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
+      const pct = formatEvolutionPercent(obj.evolution_factor);
+      const suffix = pct ? ` (EF=${pct}%)` : '';
+      const content = `🧬 ${msg}${suffix}`;
+      postToDiscord(content, 'warning').catch(() => { });
     } else {
       // future events mapping
       const content = `⚠️ ${player}: ${t}`;

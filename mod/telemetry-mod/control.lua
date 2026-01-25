@@ -22,6 +22,7 @@ local DEFAULT_EVOLUTION_MIN_DELTA = 0.01 -- log when evolution changes at least 
 local DEFAULT_EVOLUTION_INCLUDE_DOMINANCE = true -- include "dominance change" thresholds
 local DEFAULT_EVOLUTION_NOTIFY_CHAT = true -- emit chat/server messages on thresholds
 local DEFAULT_EVOLUTION_FORCE_NAME = "enemy" -- which force to observe (usually "enemy")
+local DEFAULT_EVOLUTION_SURFACE_NAME = "nauvis" -- which surface to observe for evolution
 local LOG_FILE = DEFAULT_LOG_FILE
 local AFK_INTERVAL_TICKS = DEFAULT_AFK_INTERVAL_SECONDS * 60 -- ticks
 local DEBUG = DEFAULT_DEBUG
@@ -35,6 +36,7 @@ local EVOLUTION_MIN_DELTA = DEFAULT_EVOLUTION_MIN_DELTA
 local EVOLUTION_INCLUDE_DOMINANCE = DEFAULT_EVOLUTION_INCLUDE_DOMINANCE
 local EVOLUTION_NOTIFY_CHAT = DEFAULT_EVOLUTION_NOTIFY_CHAT
 local EVOLUTION_FORCE_NAME = DEFAULT_EVOLUTION_FORCE_NAME
+local EVOLUTION_SURFACE_NAME = DEFAULT_EVOLUTION_SURFACE_NAME
 
 -- Keep track of last registered nth_tick values so setting changes do not leave stale handlers behind.
 local LAST_AFK_INTERVAL_TICKS = AFK_INTERVAL_TICKS
@@ -89,6 +91,22 @@ local EVOLUTION_THRESHOLDS_CORE = {
   { value = 0.90, kind = "tier", key = "behemoth", message = "Ewolucja obcych 90%: moga pojawic sie behemothy i behemoth wormy." }
 }
 
+local EVOLUTION_THRESHOLDS_RAMPANT_FIXED = {
+  { value = 0.10, kind = "tier", key = "tier_2", message = "Ewolucja obcych 10%: pojawia sie tier 2." },
+  { value = 0.22, kind = "tier", key = "tier_3", message = "Ewolucja obcych 22%: pojawia sie tier 3." },
+  { value = 0.38, kind = "tier", key = "tier_4", message = "Ewolucja obcych 38%: pojawia sie tier 4." },
+  { value = 0.47, kind = "tier", key = "tier_5", message = "Ewolucja obcych 47%: pojawia sie tier 5." },
+  { value = 0.65, kind = "tier", key = "tier_6", message = "Ewolucja obcych 65%: pojawia sie tier 6." },
+  { value = 0.74, kind = "tier", key = "tier_7", message = "Ewolucja obcych 74%: pojawia sie tier 7." },
+  { value = 0.80, kind = "tier", key = "tier_8", message = "Ewolucja obcych 80%: pojawia sie tier 8." },
+  { value = 0.85, kind = "tier", key = "tier_9", message = "Ewolucja obcych 85%: pojawia sie tier 9." },
+  { value = 0.91, kind = "tier", key = "tier_10", message = "Ewolucja obcych 91%: pojawia sie tier 10." },
+  { value = 0.936, kind = "tier", key = "tier_10_25", message = "Ewolucja obcych 93.6%: tier 10 pojawią się częściej." },
+  { value = 0.943, kind = "tier", key = "tier_10_33", message = "Ewolucja obcych 94.3%: tier 10 pojawia się wyraźnie częściej." },
+  { value = 0.955, kind = "tier", key = "tier_10_50", message = "Ewolucja obcych 95.5%: tier 10 dominuje." },
+  { value = 0.9705, kind = "tier", key = "tier_10_75", message = "Ewolucja obcych 97.05%: tier 10 zdecydowanie dominuje." }
+}
+
 local EVOLUTION_THRESHOLDS_DOMINANCE = {
   { value = 0.36, kind = "dominance", key = "medium_biter_majority", message = "Ewolucja obcych ~36%: srednie bitery staja sie dominujace (ok. 50%)." },
   { value = 0.68, kind = "dominance", key = "big_biter_majority", message = "Ewolucja obcych ~68%: duze bitery staja sie dominujace (ok. 50%)." },
@@ -111,10 +129,50 @@ local function get_observed_force()
   return game.forces.enemy
 end
 
+local function get_force_evolution_factor(force_obj, surface_name)
+  if not (force_obj and force_obj.valid) then return nil end
+  local surface = nil
+  if surface_name and game and game.surfaces then
+    surface = game.surfaces[surface_name]
+  end
+  if force_obj.get_evolution_factor then
+    local ok, value = pcall(function()
+      if surface then
+        return force_obj.get_evolution_factor(surface)
+      end
+      return force_obj.get_evolution_factor()
+    end)
+    if ok then return value end
+  end
+  local ok, value = pcall(function()
+    return force_obj.evolution_factor
+  end)
+  if ok then return value end
+  return nil
+end
+
+local function is_rampant_fixed_loaded()
+  if script and script.active_mods then
+    return script.active_mods["RampantFixed"] ~= nil
+  end
+  if game and game.active_mods then
+    return game.active_mods["RampantFixed"] ~= nil
+  end
+  return false
+end
+
+local function get_core_thresholds()
+  if is_rampant_fixed_loaded() then
+    return EVOLUTION_THRESHOLDS_RAMPANT_FIXED
+  end
+  return EVOLUTION_THRESHOLDS_CORE
+end
+
 local function get_threshold_list()
   local list = {}
-  for i = 1, #EVOLUTION_THRESHOLDS_CORE do list[#list+1] = EVOLUTION_THRESHOLDS_CORE[i] end
-  if EVOLUTION_INCLUDE_DOMINANCE then
+  local core = get_core_thresholds()
+  for i = 1, #core do list[#list+1] = core[i] end
+  if (not is_rampant_fixed_loaded()) and EVOLUTION_INCLUDE_DOMINANCE then
     for i = 1, #EVOLUTION_THRESHOLDS_DOMINANCE do list[#list+1] = EVOLUTION_THRESHOLDS_DOMINANCE[i] end
   end
   table.sort(list, function(a, b) return (a.value or 0) < (b.value or 0) end)
@@ -134,7 +192,7 @@ pcall(function()
         get_enemy_evolution = function()
           local f = get_observed_force()
           if not f then return nil end
-          return f.evolution_factor
+          return get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)
         end,
         get_evolution_config = function()
           return {
@@ -336,7 +394,9 @@ local function ensure_evolution_state()
   if not global then return nil end
   global.telemetry_evolution = global.telemetry_evolution or {
     last_checked_factor = nil,
-    last_logged_factor = nil
+    last_logged_factor = nil,
+    unlogged_delta = 0,
+    prev_poll_factor = nil
   }
   return global.telemetry_evolution
 end
@@ -382,25 +442,33 @@ local function evolution_poll(event)
   if not EVOLUTION_ENABLED then return end
 
   local force_obj = get_observed_force()
-  if not (force_obj and force_obj.valid) then return end
-
-  local current = tonumber(force_obj.evolution_factor) or 0
+  local raw_current = get_force_evolution_factor(force_obj, EVOLUTION_SURFACE_NAME)
+  local current = tonumber(raw_current) or 0
   local st = ensure_evolution_state()
   if not st then return end
 
   local last_checked = st.last_checked_factor
   if last_checked == nil then last_checked = current end
 
-  -- Log periodic evolution changes (so external tools can graph it)
-  local last_logged = st.last_logged_factor
-  if last_logged == nil then last_logged = current end
-  local delta = current - last_logged
-  if math.abs(delta) >= (tonumber(EVOLUTION_MIN_DELTA) or 0) then
+  -- Accumulate small changes between logs to avoid dropping slow evolution drift.
+  st.unlogged_delta = st.unlogged_delta or 0
+  local prev_poll = st.prev_poll_factor
+  if prev_poll == nil then prev_poll = last_checked or current end
+  local delta_since_prev = current - prev_poll
+  st.prev_poll_factor = current
+  st.unlogged_delta = st.unlogged_delta + delta_since_prev
+
+  local min_delta = tonumber(EVOLUTION_MIN_DELTA) or 0
+
+  if math.abs(st.unlogged_delta) >= min_delta then
     write_evolution_telemetry_line(game.tick, "poll", force_obj.name, current, {
-      delta = delta,
+      delta = st.unlogged_delta,
       include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
     })
     st.last_logged_factor = current
+    st.unlogged_delta = 0
+  else
+    safe_log("evolution_poll: accumulated delta below threshold — skipping poll log")
   end
 
   -- Threshold crossing detection
@@ -943,9 +1011,12 @@ script.on_init(function()
     local f = get_observed_force()
     if f and f.valid then
       -- Baseline to current factor to avoid "catch-up spam" after enabling the mod.
-      global.telemetry_evolution.last_checked_factor = f.evolution_factor
-      global.telemetry_evolution.last_logged_factor = f.evolution_factor
-      write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, f.evolution_factor, {
+      local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
+      global.telemetry_evolution.last_checked_factor = current
+      global.telemetry_evolution.last_logged_factor = current
+      global.telemetry_evolution.unlogged_delta = 0
+      global.telemetry_evolution.prev_poll_factor = current
+      write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, current, {
         include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
       })
     end
@@ -1041,10 +1112,13 @@ apply_settings = function()
     pcall(function()
       local f = get_observed_force()
       if f and f.valid then
-        global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
-        global.telemetry_evolution.last_checked_factor = f.evolution_factor
-        global.telemetry_evolution.last_logged_factor = f.evolution_factor
-        write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, f.evolution_factor, {
+        global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil, unlogged_delta = 0, prev_poll_factor = nil }
+        local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
+        global.telemetry_evolution.last_checked_factor = current
+        global.telemetry_evolution.last_logged_factor = current
+        global.telemetry_evolution.unlogged_delta = 0
+        global.telemetry_evolution.prev_poll_factor = current
+        write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, current, {
           include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
         })
       end
