@@ -91,6 +91,22 @@ local EVOLUTION_THRESHOLDS_CORE = {
   { value = 0.90, kind = "tier", key = "behemoth", message = "Ewolucja obcych 90%: moga pojawic sie behemothy i behemoth wormy." }
 }
 
+local EVOLUTION_THRESHOLDS_RAMPANT_FIXED = {
+  { value = 0.10, kind = "tier", key = "tier_2", message = "Ewolucja obcych 10%: pojawia sie tier 2." },
+  { value = 0.22, kind = "tier", key = "tier_3", message = "Ewolucja obcych 22%: pojawia sie tier 3." },
+  { value = 0.38, kind = "tier", key = "tier_4", message = "Ewolucja obcych 38%: pojawia sie tier 4." },
+  { value = 0.47, kind = "tier", key = "tier_5", message = "Ewolucja obcych 47%: pojawia sie tier 5." },
+  { value = 0.65, kind = "tier", key = "tier_6", message = "Ewolucja obcych 65%: pojawia sie tier 6." },
+  { value = 0.74, kind = "tier", key = "tier_7", message = "Ewolucja obcych 74%: pojawia sie tier 7." },
+  { value = 0.80, kind = "tier", key = "tier_8", message = "Ewolucja obcych 80%: pojawia sie tier 8." },
+  { value = 0.85, kind = "tier", key = "tier_9", message = "Ewolucja obcych 85%: pojawia sie tier 9." },
+  { value = 0.91, kind = "tier", key = "tier_10", message = "Ewolucja obcych 91%: pojawia sie tier 10." },
+  { value = 0.936, kind = "tier", key = "tier_10_25", message = "Ewolucja obcych 93.6%: tier 10 pojawią się częściej." },
+  { value = 0.943, kind = "tier", key = "tier_10_33", message = "Ewolucja obcych 94.3%: tier 10 pojawia się wyraźnie częściej." },
+  { value = 0.955, kind = "tier", key = "tier_10_50", message = "Ewolucja obcych 95.5%: tier 10 dominuje." },
+  { value = 0.9705, kind = "tier", key = "tier_10_75", message = "Ewolucja obcych 97.05%: tier 10 zdecydowanie dominuje." }
+}
+
 local EVOLUTION_THRESHOLDS_DOMINANCE = {
   { value = 0.36, kind = "dominance", key = "medium_biter_majority", message = "Ewolucja obcych ~36%: srednie bitery staja sie dominujace (ok. 50%)." },
   { value = 0.68, kind = "dominance", key = "big_biter_majority", message = "Ewolucja obcych ~68%: duze bitery staja sie dominujace (ok. 50%)." },
@@ -135,10 +151,28 @@ local function get_force_evolution_factor(force_obj, surface_name)
   return nil
 end
 
+local function is_rampant_fixed_loaded()
+  if script and script.active_mods then
+    return script.active_mods["RampantFixed"] ~= nil
+  end
+  if game and game.active_mods then
+    return game.active_mods["RampantFixed"] ~= nil
+  end
+  return false
+end
+
+local function get_core_thresholds()
+  if is_rampant_fixed_loaded() then
+    return EVOLUTION_THRESHOLDS_RAMPANT_FIXED
+  end
+  return EVOLUTION_THRESHOLDS_CORE
+end
+
 local function get_threshold_list()
   local list = {}
-  for i = 1, #EVOLUTION_THRESHOLDS_CORE do list[#list+1] = EVOLUTION_THRESHOLDS_CORE[i] end
-  if EVOLUTION_INCLUDE_DOMINANCE then
+  local core = get_core_thresholds()
+  for i = 1, #core do list[#list+1] = core[i] end
+  if (not is_rampant_fixed_loaded()) and EVOLUTION_INCLUDE_DOMINANCE then
     for i = 1, #EVOLUTION_THRESHOLDS_DOMINANCE do list[#list+1] = EVOLUTION_THRESHOLDS_DOMINANCE[i] end
   end
   table.sort(list, function(a, b) return (a.value or 0) < (b.value or 0) end)
