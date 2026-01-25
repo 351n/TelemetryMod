@@ -15,12 +15,30 @@ local DEFAULT_DEBUG_AFK = false
 local DEFAULT_MAX_BYTES = 50 * 1024 -- 50 KB
 local DEFAULT_MAX_AGE_SECONDS = 24 * 60 * 60 -- 24 hours
 
+-- Evolution telemetry + alerts
+local DEFAULT_EVOLUTION_ENABLED = true
+local DEFAULT_EVOLUTION_INTERVAL_SECONDS = 10
+local DEFAULT_EVOLUTION_MIN_DELTA = 0.01 -- log when evolution changes at least this much
+local DEFAULT_EVOLUTION_INCLUDE_DOMINANCE = true -- include "dominance change" thresholds
+local DEFAULT_EVOLUTION_NOTIFY_CHAT = true -- emit chat/server messages on thresholds
+local DEFAULT_EVOLUTION_FORCE_NAME = "enemy" -- which force to observe (usually "enemy")
 local LOG_FILE = DEFAULT_LOG_FILE
 local AFK_INTERVAL_TICKS = DEFAULT_AFK_INTERVAL_SECONDS * 60 -- ticks
 local DEBUG = DEFAULT_DEBUG
 local DEBUG_AFK = DEFAULT_DEBUG_AFK
 local MAX_BYTES = DEFAULT_MAX_BYTES
 local MAX_AGE_SECONDS = DEFAULT_MAX_AGE_SECONDS
+
+local EVOLUTION_ENABLED = DEFAULT_EVOLUTION_ENABLED
+local EVOLUTION_INTERVAL_TICKS = DEFAULT_EVOLUTION_INTERVAL_SECONDS * 60
+local EVOLUTION_MIN_DELTA = DEFAULT_EVOLUTION_MIN_DELTA
+local EVOLUTION_INCLUDE_DOMINANCE = DEFAULT_EVOLUTION_INCLUDE_DOMINANCE
+local EVOLUTION_NOTIFY_CHAT = DEFAULT_EVOLUTION_NOTIFY_CHAT
+local EVOLUTION_FORCE_NAME = DEFAULT_EVOLUTION_FORCE_NAME
+
+-- Keep track of last registered nth_tick values so setting changes do not leave stale handlers behind.
+local LAST_AFK_INTERVAL_TICKS = AFK_INTERVAL_TICKS
+local LAST_EVOLUTION_INTERVAL_TICKS = EVOLUTION_INTERVAL_TICKS
 
 -- Escape minimal set of characters for safe JSON strings
 local function escape_json_string(s)
@@ -52,6 +70,89 @@ local function safe_log(msg)
     end
   end)
 end
+
+-- Custom event raised when evolution crosses a threshold.
+-- Other mods can subscribe via:
+--   local id = remote.call("telemetry_mod","get_evolution_event_id")
+--   script.on_event(id, function(e) ... end)
+local EVOLUTION_THRESHOLD_EVENT_ID = script.generate_event_name()
+
+-- Threshold definitions. Values based on Factorio wiki enemies spawn chances / evolution curves.
+local EVOLUTION_THRESHOLDS_CORE = {
+  { value = 0.20, kind = "tier", key = "medium_biter", message = "Ewolucja obcych 20%: moga pojawic sie srednie bitery." },
+  { value = 0.25, kind = "tier", key = "small_spitter", message = "Ewolucja obcych 25%: moga pojawic sie male spitery." },
+  { value = 0.30, kind = "tier", key = "medium_worm", message = "Ewolucja obcych 30%: ekspansje moga miec srednie wormy." },
+  { value = 0.40, kind = "tier", key = "medium_spitter", message = "Ewolucja obcych 40%: moga pojawic sie srednie spitery." },
+  { value = 0.50, kind = "tier", key = "big_biter_spitter_worm", message = "Ewolucja obcych 50%: moga pojawic sie duze bitery/spitery oraz duze wormy." },
+  { value = 0.60, kind = "tier", key = "no_small_biter", message = "Ewolucja obcych 60%: male bitery przestaja byc spawnione." },
+  { value = 0.70, kind = "tier", key = "no_small_spitter", message = "Ewolucja obcych 70%: male spitery przestaja byc spawnione." },
+  { value = 0.90, kind = "tier", key = "behemoth", message = "Ewolucja obcych 90%: moga pojawic sie behemothy i behemoth wormy." }
+}
+
+local EVOLUTION_THRESHOLDS_DOMINANCE = {
+  { value = 0.36, kind = "dominance", key = "medium_biter_majority", message = "Ewolucja obcych ~36%: srednie bitery staja sie dominujace (ok. 50%)." },
+  { value = 0.68, kind = "dominance", key = "big_biter_majority", message = "Ewolucja obcych ~68%: duze bitery staja sie dominujace (ok. 50%)." },
+  { value = 0.78, kind = "dominance", key = "big_spitter_majority", message = "Ewolucja obcych ~78%: duze spitery staja sie dominujace (ok. 50%)." },
+  { value = 0.916, kind = "dominance", key = "behemoth_visible_10", message = "Ewolucja obcych ~91.6%: behemothy zaczynaja byc widoczne (~10%)." },
+  { value = 0.938, kind = "dominance", key = "behemoth_visible_20", message = "Ewolucja obcych ~93.8%: behemothy staja sie czestsze (~20%)." }
+}
+
+local function fmt_pct01(x)
+  if x == nil then return "?" end
+  local pct = math.floor((tonumber(x) or 0) * 1000 + 0.5) / 10 -- 0.1%
+  return tostring(pct)
+end
+
+local function get_observed_force()
+  if not game or not game.forces then return nil end
+  if EVOLUTION_FORCE_NAME and game.forces[EVOLUTION_FORCE_NAME] then
+    return game.forces[EVOLUTION_FORCE_NAME]
+  end
+  return game.forces.enemy
+end
+
+local function get_threshold_list()
+  local list = {}
+  for i = 1, #EVOLUTION_THRESHOLDS_CORE do list[#list+1] = EVOLUTION_THRESHOLDS_CORE[i] end
+  if EVOLUTION_INCLUDE_DOMINANCE then
+    for i = 1, #EVOLUTION_THRESHOLDS_DOMINANCE do list[#list+1] = EVOLUTION_THRESHOLDS_DOMINANCE[i] end
+  end
+  table.sort(list, function(a, b) return (a.value or 0) < (b.value or 0) end)
+  return list
+end
+
+-- Remote interface for other mods / scripts
+pcall(function()
+  if remote and remote.add_interface then
+    local exists = false
+    pcall(function()
+      if remote.interfaces and remote.interfaces["telemetry_mod"] then exists = true end
+    end)
+    if not exists then
+      remote.add_interface("telemetry_mod", {
+        get_evolution_event_id = function() return EVOLUTION_THRESHOLD_EVENT_ID end,
+        get_enemy_evolution = function()
+          local f = get_observed_force()
+          if not f then return nil end
+          return f.evolution_factor
+        end,
+        get_evolution_config = function()
+          return {
+            enabled = EVOLUTION_ENABLED,
+            interval_ticks = EVOLUTION_INTERVAL_TICKS,
+            min_delta = EVOLUTION_MIN_DELTA,
+            include_dominance = EVOLUTION_INCLUDE_DOMINANCE,
+            notify_chat = EVOLUTION_NOTIFY_CHAT,
+            force_name = EVOLUTION_FORCE_NAME
+          }
+        end,
+        get_evolution_thresholds = function()
+          return get_threshold_list()
+        end
+      })
+    end
+  end
+end)
 
 -- Check once whether game.write_file is available in this runtime.
 -- We wrap the check in pcall because indexing the userdata may throw on some runtimes.
@@ -181,6 +282,153 @@ local function write_json_line(line, suppress_debug)
   end
 
   flush_buffer_to_file()
+end
+
+-- Evolution telemetry (enemy evolution factor) ---------------------------------
+
+local function write_evolution_telemetry_line(tick, trigger, force_name, evolution_factor, extra)
+  extra = extra or {}
+  local parts = {
+    string.format('{"tick":%d,"type":"evolution","trigger":"%s","force":"%s","evolution_factor":%.6f',
+      tick or ((game and game.tick) or 0),
+      escape_json_string(trigger or "poll"),
+      escape_json_string(force_name or (EVOLUTION_FORCE_NAME or "enemy")),
+      tonumber(evolution_factor) or 0
+    )
+  }
+
+  -- Optional fields (kept flat for easy downstream parsing)
+  if extra.delta ~= nil then
+    parts[#parts+1] = string.format(',"delta":%.6f', tonumber(extra.delta) or 0)
+  end
+  if extra.threshold ~= nil then
+    parts[#parts+1] = string.format(',"threshold":%.6f', tonumber(extra.threshold) or 0)
+  end
+  if extra.threshold_kind ~= nil then
+    parts[#parts+1] = string.format(',"threshold_kind":"%s"', escape_json_string(extra.threshold_kind))
+  end
+  if extra.threshold_key ~= nil then
+    parts[#parts+1] = string.format(',"threshold_key":"%s"', escape_json_string(extra.threshold_key))
+  end
+  if extra.direction ~= nil then
+    parts[#parts+1] = string.format(',"direction":"%s"', escape_json_string(extra.direction))
+  end
+  if extra.include_dominance ~= nil then
+    parts[#parts+1] = string.format(',"include_dominance":%s', extra.include_dominance and "true" or "false")
+  end
+  if extra.message ~= nil then
+    parts[#parts+1] = string.format(',"message":"%s"', escape_json_string(extra.message))
+  end
+
+  parts[#parts+1] = "}"
+  write_json_line(table.concat(parts, ""))
+end
+
+local function raise_evolution_threshold_event(payload)
+  pcall(function()
+    if script and script.raise_event then
+      script.raise_event(EVOLUTION_THRESHOLD_EVENT_ID, payload)
+    end
+  end)
+end
+
+local function ensure_evolution_state()
+  if not global then return nil end
+  global.telemetry_evolution = global.telemetry_evolution or {
+    last_checked_factor = nil,
+    last_logged_factor = nil
+  }
+  return global.telemetry_evolution
+end
+
+local function maybe_emit_threshold(th, force_obj, current_factor, direction)
+  local tick = (game and game.tick) or 0
+  local force_name = (force_obj and force_obj.name) or (EVOLUTION_FORCE_NAME or "enemy")
+  local msg = th and th.message or ""
+
+  -- Telemetry line (machine-readable + includes message for convenience)
+  write_evolution_telemetry_line(tick, "threshold", force_name, current_factor, {
+    threshold = th and th.value,
+    threshold_kind = th and th.kind,
+    threshold_key = th and th.key,
+    direction = direction or "up",
+    include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
+    message = msg
+  })
+
+  -- Raise custom event for other mods to handle (they can ignore our message)
+  raise_evolution_threshold_event({
+    tick = tick,
+    force_name = force_name,
+    evolution_factor = current_factor,
+    threshold = th and th.value,
+    threshold_kind = th and th.kind,
+    threshold_key = th and th.key,
+    direction = direction or "up",
+    include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
+    message = msg
+  })
+
+  -- Built-in chat message (optional)
+  if EVOLUTION_NOTIFY_CHAT and game and game.print and msg ~= "" then
+    pcall(function()
+      game.print(string.format("[telemetry-mod] %s (EF=%s%%)", msg, fmt_pct01(current_factor)))
+    end)
+  end
+end
+
+local function evolution_poll(event)
+  if not game then return end
+  if not EVOLUTION_ENABLED then return end
+
+  local force_obj = get_observed_force()
+  if not (force_obj and force_obj.valid) then return end
+
+  local current = tonumber(force_obj.evolution_factor) or 0
+  local st = ensure_evolution_state()
+  if not st then return end
+
+  local last_checked = st.last_checked_factor
+  if last_checked == nil then last_checked = current end
+
+  -- Log periodic evolution changes (so external tools can graph it)
+  local last_logged = st.last_logged_factor
+  if last_logged == nil then last_logged = current end
+  local delta = current - last_logged
+  if math.abs(delta) >= (tonumber(EVOLUTION_MIN_DELTA) or 0) then
+    write_evolution_telemetry_line(game.tick, "poll", force_obj.name, current, {
+      delta = delta,
+      include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
+    })
+    st.last_logged_factor = current
+  end
+
+  -- Threshold crossing detection
+  local thresholds = get_threshold_list()
+  if current >= last_checked then
+    for i = 1, #thresholds do
+      local th = thresholds[i]
+      local v = th and th.value
+      if v and last_checked < v and current >= v then
+        maybe_emit_threshold(th, force_obj, current, "up")
+      end
+    end
+  else
+    -- Evolution decreased (rare). Emit DOWN events for thresholds crossed downward (no chat by default).
+    for i = #thresholds, 1, -1 do
+      local th = thresholds[i]
+      local v = th and th.value
+      if v and last_checked >= v and current < v then
+        -- Temporarily suppress chat if it's enabled (down events are usually noise)
+        local old_chat = EVOLUTION_NOTIFY_CHAT
+        EVOLUTION_NOTIFY_CHAT = false
+        maybe_emit_threshold(th, force_obj, current, "down")
+        EVOLUTION_NOTIFY_CHAT = old_chat
+      end
+    end
+  end
+
+  st.last_checked_factor = current
 end
 
 local function safe_player_name_from_index(index)
@@ -674,6 +922,7 @@ end
 script.on_event(defines.events.on_player_joined_game, on_player_joined)
 script.on_event(defines.events.on_player_left_game, on_player_left)
 script.on_nth_tick(AFK_INTERVAL_TICKS, afk_poll)
+script.on_nth_tick(EVOLUTION_INTERVAL_TICKS, evolution_poll)
 -- Register player death event (guarded handler)
 pcall(function() script.on_event(defines.events.on_player_died, on_player_died) end)
 -- Register research finished event (guarded)
@@ -688,6 +937,20 @@ script.on_init(function()
   -- Translation state for research telemetry
   global.tech_translation_cache = global.tech_translation_cache or {}
   global.pending_research_translations = global.pending_research_translations or {}
+  -- Evolution telemetry state
+  global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
+  pcall(function()
+    local f = get_observed_force()
+    if f and f.valid then
+      -- Baseline to current factor to avoid "catch-up spam" after enabling the mod.
+      global.telemetry_evolution.last_checked_factor = f.evolution_factor
+      global.telemetry_evolution.last_logged_factor = f.evolution_factor
+      write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, f.evolution_factor, {
+        include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
+      })
+    end
+  end)
+
   -- Try to clear the log using available backend (overwrite=false to clear)
   local ok, err = write_file_safe(LOG_FILE, "", false)
   if ok then
@@ -702,15 +965,24 @@ script.on_init(function()
   end
 end)
 
+local apply_settings -- forward declaration
+
 -- Ensure nth_tick is registered after a configuration change / load
 script.on_configuration_changed(function(data)
-  -- re-register nth tick to be safe after mod updates
-  script.on_nth_tick(AFK_INTERVAL_TICKS, afk_poll)
   -- ensure translation state exists
-  global.tech_translation_cache = global.tech_translation_cache or {}
-  global.pending_research_translations = global.pending_research_translations or {}
-  safe_game_print("telemetry-mod configuration changed; nth_tick re-registered")
-  safe_log("telemetry-mod configuration changed")
+  if global then
+    global.tech_translation_cache = global.tech_translation_cache or {}
+    global.pending_research_translations = global.pending_research_translations or {}
+    global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
+  end
+
+  -- Re-apply settings and re-register nth_tick handlers safely
+  pcall(function()
+    if apply_settings then apply_settings() end
+  end)
+
+  safe_game_print("telemetry-mod configuration changed; settings re-applied")
+  safe_log("telemetry-mod configuration changed; settings re-applied")
 end)
 
 -- Read runtime-global settings (if available) and apply them at runtime.
@@ -721,10 +993,18 @@ local function read_setting(name, def)
   return def
 end
 
-local function apply_settings()
+apply_settings = function()
   LOG_FILE = tostring(read_setting("telemetry-log-file", DEFAULT_LOG_FILE) or DEFAULT_LOG_FILE)
+
+  -- AFK polling interval
   local secs = tonumber(read_setting("telemetry-afk-interval-seconds", DEFAULT_AFK_INTERVAL_SECONDS)) or DEFAULT_AFK_INTERVAL_SECONDS
-  AFK_INTERVAL_TICKS = math.max(1, math.floor(secs)) * 60
+  local new_afk_ticks = math.max(1, math.floor(secs)) * 60
+  if LAST_AFK_INTERVAL_TICKS and LAST_AFK_INTERVAL_TICKS ~= new_afk_ticks then
+    pcall(function() script.on_nth_tick(LAST_AFK_INTERVAL_TICKS, nil) end)
+  end
+  AFK_INTERVAL_TICKS = new_afk_ticks
+  LAST_AFK_INTERVAL_TICKS = AFK_INTERVAL_TICKS
+
   DEBUG = read_setting("telemetry-debug", DEFAULT_DEBUG) == true
   DEBUG_AFK = read_setting("telemetry-debug-afk", DEFAULT_DEBUG_AFK) == true
 
@@ -732,8 +1012,44 @@ local function apply_settings()
   MAX_BYTES = tonumber(read_setting("telemetry-max-bytes", DEFAULT_MAX_BYTES)) or DEFAULT_MAX_BYTES
   MAX_AGE_SECONDS = tonumber(read_setting("telemetry-max-age-seconds", DEFAULT_MAX_AGE_SECONDS)) or DEFAULT_MAX_AGE_SECONDS
 
-  -- re-register nth tick with updated interval
+  -- Re-register nth tick with updated interval
   script.on_nth_tick(AFK_INTERVAL_TICKS, afk_poll)
+
+  -- Evolution telemetry + alerts
+  local old_force_name = EVOLUTION_FORCE_NAME
+  EVOLUTION_ENABLED = read_setting("telemetry-evolution-enabled", DEFAULT_EVOLUTION_ENABLED) == true
+  local evo_secs = tonumber(read_setting("telemetry-evolution-interval-seconds", DEFAULT_EVOLUTION_INTERVAL_SECONDS)) or DEFAULT_EVOLUTION_INTERVAL_SECONDS
+  local new_evo_ticks = math.max(1, math.floor(evo_secs)) * 60
+  EVOLUTION_INTERVAL_TICKS = new_evo_ticks
+  EVOLUTION_MIN_DELTA = tonumber(read_setting("telemetry-evolution-min-delta", DEFAULT_EVOLUTION_MIN_DELTA)) or DEFAULT_EVOLUTION_MIN_DELTA
+  EVOLUTION_INCLUDE_DOMINANCE = read_setting("telemetry-evolution-include-dominance", DEFAULT_EVOLUTION_INCLUDE_DOMINANCE) == true
+  EVOLUTION_NOTIFY_CHAT = read_setting("telemetry-evolution-notify-chat", DEFAULT_EVOLUTION_NOTIFY_CHAT) == true
+  EVOLUTION_FORCE_NAME = tostring(read_setting("telemetry-evolution-force-name", DEFAULT_EVOLUTION_FORCE_NAME) or DEFAULT_EVOLUTION_FORCE_NAME)
+
+  -- Avoid leaving stale nth_tick handlers behind
+  if LAST_EVOLUTION_INTERVAL_TICKS and (LAST_EVOLUTION_INTERVAL_TICKS ~= EVOLUTION_INTERVAL_TICKS or not EVOLUTION_ENABLED) then
+    pcall(function() script.on_nth_tick(LAST_EVOLUTION_INTERVAL_TICKS, nil) end)
+  end
+  LAST_EVOLUTION_INTERVAL_TICKS = EVOLUTION_INTERVAL_TICKS
+
+  if EVOLUTION_ENABLED then
+    script.on_nth_tick(EVOLUTION_INTERVAL_TICKS, evolution_poll)
+  end
+
+  -- If the observed force changed, baseline the evolution state (prevents retro-trigger spam).
+  if global and old_force_name ~= EVOLUTION_FORCE_NAME then
+    pcall(function()
+      local f = get_observed_force()
+      if f and f.valid then
+        global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
+        global.telemetry_evolution.last_checked_factor = f.evolution_factor
+        global.telemetry_evolution.last_logged_factor = f.evolution_factor
+        write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, f.evolution_factor, {
+          include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
+        })
+      end
+    end)
+  end
 end
 
 -- Apply settings on load
