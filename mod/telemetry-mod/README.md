@@ -4,6 +4,7 @@ Runtime-only Factorio mod that writes one JSON object per line to `script-output
 
 Overview
 - Logs lightweight telemetry events (examples: `join`, `leave`, `afk`, `death`, `research`) so external relays can read and forward them.
+- Emits evolution telemetry (`type: "evolution"`) for periodic polling and threshold crossings, including optional dominance thresholds.
 
 Install
 1. Pack the `telemetry-mod` folder as a ZIP (or copy the folder) into the game's `mods` directory.
@@ -25,6 +26,7 @@ Append valid JSON Lines to `script-output/telemetry.jsonl` (one JSON object per 
 {"tick":1234,"type":"join","player":"PlayerOne"}
 {"tick":1240,"type":"afk","player":"PlayerOne","afk_ticks":900,"afk_seconds":15}
 {"tick":2000,"type":"leave","player":"PlayerOne"}
+{"tick":3500,"type":"evolution","trigger":"threshold","force":"enemy","evolution_factor":0.500000,"threshold":0.5,"threshold_kind":"tier","threshold_key":"big_biter_spitter_worm","direction":"up","include_dominance":true,"message":"Ewolucja obcych 50%: moga pojawic sie duze bitery/spitery oraz duze wormy."}
 
 Notes for integrators
 - Preserve the event schema (`type` values and required fields). External relays (e.g., `bot/src/relay.js`) depend on these fields.
