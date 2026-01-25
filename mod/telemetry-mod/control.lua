@@ -152,8 +152,13 @@ local function get_force_evolution_factor(force_obj, surface_name)
 end
 
 local function is_rampant_fixed_loaded()
-  if not game or not game.active_mods then return false end
-  return game.active_mods["RampantFixed"] ~= nil
+  if script and script.active_mods then
+    return script.active_mods["RampantFixed"] ~= nil
+  end
+  if game and game.active_mods then
+    return game.active_mods["RampantFixed"] ~= nil
+  end
+  return false
 end
 
 local function get_core_thresholds()
