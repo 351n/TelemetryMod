@@ -22,6 +22,7 @@ local DEFAULT_EVOLUTION_MIN_DELTA = 0.01 -- log when evolution changes at least 
 local DEFAULT_EVOLUTION_INCLUDE_DOMINANCE = true -- include "dominance change" thresholds
 local DEFAULT_EVOLUTION_NOTIFY_CHAT = true -- emit chat/server messages on thresholds
 local DEFAULT_EVOLUTION_FORCE_NAME = "enemy" -- which force to observe (usually "enemy")
+local DEFAULT_EVOLUTION_SURFACE_NAME = "nauvis" -- which surface to observe for evolution
 local LOG_FILE = DEFAULT_LOG_FILE
 local AFK_INTERVAL_TICKS = DEFAULT_AFK_INTERVAL_SECONDS * 60 -- ticks
 local DEBUG = DEFAULT_DEBUG
@@ -35,6 +36,7 @@ local EVOLUTION_MIN_DELTA = DEFAULT_EVOLUTION_MIN_DELTA
 local EVOLUTION_INCLUDE_DOMINANCE = DEFAULT_EVOLUTION_INCLUDE_DOMINANCE
 local EVOLUTION_NOTIFY_CHAT = DEFAULT_EVOLUTION_NOTIFY_CHAT
 local EVOLUTION_FORCE_NAME = DEFAULT_EVOLUTION_FORCE_NAME
+local EVOLUTION_SURFACE_NAME = DEFAULT_EVOLUTION_SURFACE_NAME
 
 -- Keep track of last registered nth_tick values so setting changes do not leave stale handlers behind.
 local LAST_AFK_INTERVAL_TICKS = AFK_INTERVAL_TICKS
@@ -111,6 +113,28 @@ local function get_observed_force()
   return game.forces.enemy
 end
 
+local function get_force_evolution_factor(force_obj, surface_name)
+  if not (force_obj and force_obj.valid) then return nil end
+  local surface = nil
+  if surface_name and game and game.surfaces then
+    surface = game.surfaces[surface_name]
+  end
+  if force_obj.get_evolution_factor then
+    local ok, value = pcall(function()
+      if surface then
+        return force_obj.get_evolution_factor(surface)
+      end
+      return force_obj.get_evolution_factor()
+    end)
+    if ok then return value end
+  end
+  local ok, value = pcall(function()
+    return force_obj.evolution_factor
+  end)
+  if ok then return value end
+  return nil
+end
+
 local function get_threshold_list()
   local list = {}
   for i = 1, #EVOLUTION_THRESHOLDS_CORE do list[#list+1] = EVOLUTION_THRESHOLDS_CORE[i] end
@@ -134,7 +158,7 @@ pcall(function()
         get_enemy_evolution = function()
           local f = get_observed_force()
           if not f then return nil end
-          return f.evolution_factor
+          return get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)
         end,
         get_evolution_config = function()
           return {
@@ -384,7 +408,7 @@ local function evolution_poll(event)
   local force_obj = get_observed_force()
   if not (force_obj and force_obj.valid) then return end
 
-  local current = tonumber(force_obj.evolution_factor) or 0
+  local current = tonumber(get_force_evolution_factor(force_obj, EVOLUTION_SURFACE_NAME)) or 0
   local st = ensure_evolution_state()
   if not st then return end
 
@@ -943,9 +967,10 @@ script.on_init(function()
     local f = get_observed_force()
     if f and f.valid then
       -- Baseline to current factor to avoid "catch-up spam" after enabling the mod.
-      global.telemetry_evolution.last_checked_factor = f.evolution_factor
-      global.telemetry_evolution.last_logged_factor = f.evolution_factor
-      write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, f.evolution_factor, {
+      local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
+      global.telemetry_evolution.last_checked_factor = current
+      global.telemetry_evolution.last_logged_factor = current
+      write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, current, {
         include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
       })
     end
@@ -1042,9 +1067,10 @@ apply_settings = function()
       local f = get_observed_force()
       if f and f.valid then
         global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
-        global.telemetry_evolution.last_checked_factor = f.evolution_factor
-        global.telemetry_evolution.last_logged_factor = f.evolution_factor
-        write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, f.evolution_factor, {
+        local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
+        global.telemetry_evolution.last_checked_factor = current
+        global.telemetry_evolution.last_logged_factor = current
+        write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, current, {
           include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
         })
       end
