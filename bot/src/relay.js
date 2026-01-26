@@ -51,6 +51,10 @@ let state = {
   lastFileSize: 0
 };
 
+// persisted summary of suppressed events during quiet hours
+state.suppressedEvents = state.suppressedEvents || [];
+state.wasQuiet = state.wasQuiet || false;
+
 async function loadState() {
   try {
     const raw = await fs.readFile(STATE_FILE, 'utf8');
@@ -156,12 +160,67 @@ function shouldNotifyEvolutionThreshold(obj) {
   return false;
 }
 
-async function postToDiscord(content, severity = 'info') {
+function buildSuppressedSummary(events) {
+  if (!events || !events.length) return null;
+  const researchSet = new Set();
+  let deathCount = 0;
+  const deathPlayers = [];
+  const others = [];
+
+  for (const e of events) {
+    const meta = e.meta || {};
+    const content = e.content || '';
+    if (meta.type === 'research' && meta.tech) {
+      researchSet.add(meta.tech);
+    } else if (meta.type === 'death') {
+      deathCount++;
+      if (meta.player) deathPlayers.push(meta.player);
+    } else if (content && content.startsWith('🔬')) {
+      // try to parse tech name
+      const m = content.match(/(?:odkrył|Odkryto)\s+(.+)$/i);
+      if (m && m[1]) researchSet.add(m[1].trim()); else others.push(content);
+    } else if (content && content.startsWith('💀')) {
+      deathCount++;
+      const m = content.match(/💀\s+([^\s]+)\s/);
+      if (m && m[1]) deathPlayers.push(m[1]);
+    } else {
+      others.push(content);
+    }
+  }
+
+  let lines = [];
+  lines.push('Podsumowanie z quiet hours:');
+  if (researchSet.size) {
+    lines.push('Odkryte technologie:');
+    for (const t of researchSet) lines.push(`- ${t}`);
+  }
+  if (deathCount) {
+    lines.push(`Śmierci graczy: ${deathCount}` + (deathPlayers.length ? ` (lista: ${[...new Set(deathPlayers)].join(', ')})` : ''));
+  }
+  if (others.length) {
+    lines.push('Inne zdarzenia:');
+    for (const o of others.slice(0, 10)) lines.push(`- ${o}`);
+    if (others.length > 10) lines.push(`... i ${others.length - 10} innych`);
+  }
+
+  return lines.join('\n');
+}
+
+async function postToDiscord(content, severity = 'info', meta = null) {
   const now = Date.now();
 
   const quiet = isQuietNow();
-  // During quiet hours only allow critical messages through
-  if (quiet && severity !== 'critical') return;
+  // During quiet hours only allow critical messages through; record suppressed events
+  if (quiet && severity !== 'critical') {
+    try {
+      state.suppressedEvents = state.suppressedEvents || [];
+      state.suppressedEvents.push({ time: now, severity, content, meta });
+      await saveState();
+    } catch (e) {
+      // ignore save errors
+    }
+    return;
+  }
 
   const last = dedupMap.get(content) || 0;
   if (now - last < DEDUP_SECONDS * 1000) return;
@@ -254,11 +313,11 @@ function handleEvent(obj) {
         if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
           p.isAfk = true;
           state.players[player] = p;
-          notify(`💤 ${player} AFK`, 'warning');
+          notify(`💤 ${player} AFK`, 'warning', { type: 'afk', player });
         } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
           p.isAfk = false;
           state.players[player] = p;
-          notify(`🔔 ${player} wrócił z AFK`, 'warning');
+          notify(`🔔 ${player} wrócił z AFK`, 'warning', { type: 'afk', player });
         }
       },
       death: () => {
@@ -272,7 +331,7 @@ function handleEvent(obj) {
         if (causeForce) parts.push(`(${causeForce})`);
         if (dmg) parts.push(`typ:${dmg}`);
         const detail = parts.length ? ` — ${parts.join(' ')}` : '';
-        notify(`💀 ${player} zginął${detail}${pos}`);
+        notify(`💀 ${player} zginął${detail}${pos}`, 'info', { type: 'death', player, detail });
       },
       research: () => {
         const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
@@ -282,21 +341,25 @@ function handleEvent(obj) {
         const content = (force && force != 'player')
           ? `🔬 ${force} odkrył ${techName}`
           : `🔬 Odkryto ${techName}`;
-        notify(content);
+        notify(content, 'info', { type: 'research', tech: techName });
       },
       evolution: () => {
         if (!shouldNotifyEvolutionThreshold(obj)) return;
         const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
         const pct = formatEvolutionPercent(obj.evolution_factor);
         const suffix = pct ? ` (EF=${pct}%)` : '';
-        notify(`🧬 ${msg}${suffix}`, 'critical');
+        notify(`🧬 ${msg}${suffix}`, 'critical', { type: 'evolution' });
       }
     };
 
     if (handlers[t]) {
+      // use notify wrapper that attaches meta
+      function notify(content, severity = 'info', meta = null) {
+        postToDiscord(content, severity, meta);
+      }
       handlers[t]();
     } else {
-      notify(`⚠️ ${player}: ${t}`, 'critical');
+      postToDiscord(`⚠️ ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
     }
   } catch (e) {
     console.error('handleEvent error:', e);
@@ -326,9 +389,28 @@ async function processBuffer(buf) {
 async function loop() {
   await loadState();
   console.log('Starting relay. Protocol:', PROTOCOL, 'remote:', REMOTE_PATH);
+  // initialize wasQuiet from current time if not present
+  state.wasQuiet = state.wasQuiet || isQuietNow();
+  await saveState();
 
   while (true) {
     try {
+      // check quiet-hours transition: if we were quiet and now are not, post summary
+      const nowQuiet = isQuietNow();
+      if (state.wasQuiet && !nowQuiet) {
+        try {
+          if (state.suppressedEvents && state.suppressedEvents.length) {
+            const summary = buildSuppressedSummary(state.suppressedEvents);
+            if (summary) await postToDiscord(summary, 'info');
+          }
+        } catch (e) {
+          console.error('Error sending quiet-hours summary:', e);
+        }
+        state.suppressedEvents = [];
+        await saveState();
+      }
+      state.wasQuiet = nowQuiet;
+
       let readResult;
       if (PROTOCOL === 'sftp') {
         readResult = await retry(() => sftpReadRange(state.offset), 'sftp-read', 5);
