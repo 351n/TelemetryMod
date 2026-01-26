@@ -240,67 +240,63 @@ function handleEvent(obj) {
     if (!obj || !obj.type) return;
     const t = obj.type;
     const player = obj.player || 'unknown';
-    let severity = 'info';
 
-    if (t === 'join') {
-      const content = `🟢 ${player} wszedł na serwer`;
-      severity = 'critical';
+    function notify(content, severity = 'info') {
       postToDiscord(content, severity).catch(() => { });
-    } else if (t === 'leave') {
-      severity = 'critical';
-      const content = `⚪ ${player} wyszedł z serwera`;
-      postToDiscord(content, severity).catch(() => { });
-    } else if (t === 'afk') {
-      const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
-      const p = state.players[player] || { isAfk: false };
-      if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
-        p.isAfk = true;
-        state.players[player] = p;
-        severity = 'warning';
-        postToDiscord(`💤 ${player} AFK`, severity).catch(() => { });
-      } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
-        p.isAfk = false;
-        state.players[player] = p;
-        severity = 'warning';
-        postToDiscord(`🔔 ${player} wrócił z AFK`, severity).catch(() => { });
+    }
+
+    const handlers = {
+      join: () => notify(`🟢 ${player} wszedł na serwer`, 'critical'),
+      leave: () => notify(`⚪ ${player} wyszedł z serwera`, 'critical'),
+      afk: () => {
+        const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
+        const p = state.players[player] || { isAfk: false };
+        if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
+          p.isAfk = true;
+          state.players[player] = p;
+          notify(`💤 ${player} AFK`, 'warning');
+        } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
+          p.isAfk = false;
+          state.players[player] = p;
+          notify(`🔔 ${player} wrócił z AFK`, 'warning');
+        }
+      },
+      death: () => {
+        const causeLocalised = (obj.cause_localised && String(obj.cause_localised).trim()) ? String(obj.cause_localised).trim() : '';
+        const cause = causeLocalised || obj.cause || obj.cause_name || '';
+        const causeForce = obj.cause_force || '';
+        const dmg = obj.damage_type || '';
+        const pos = (obj.pos && Array.isArray(obj.pos) && obj.pos.length === 2) ? ` @${obj.pos[0]},${obj.pos[1]}` : '';
+        const causeText = cause || 'nieznana przyczyna';
+        const parts = [causeText];
+        if (causeForce) parts.push(`(${causeForce})`);
+        if (dmg) parts.push(`typ:${dmg}`);
+        const detail = parts.length ? ` — ${parts.join(' ')}` : '';
+        notify(`💀 ${player} zginął${detail}${pos}`);
+      },
+      research: () => {
+        const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
+        const tech = techLocalised || obj.technology || obj.technology_name || obj.research || '';
+        const techName = tech || 'nieznana technologia';
+        const force = obj.force || '';
+        const content = (force && force != 'player')
+          ? `🔬 ${force} odkrył ${techName}`
+          : `🔬 Odkryto ${techName}`;
+        notify(content);
+      },
+      evolution: () => {
+        if (!shouldNotifyEvolutionThreshold(obj)) return;
+        const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
+        const pct = formatEvolutionPercent(obj.evolution_factor);
+        const suffix = pct ? ` (EF=${pct}%)` : '';
+        notify(`🧬 ${msg}${suffix}`, 'critical');
       }
-    } else if (t === 'death') {
-      const causeLocalised = (obj.cause_localised && String(obj.cause_localised).trim()) ? String(obj.cause_localised).trim() : '';
-      const cause = causeLocalised || obj.cause || obj.cause_name || '';
-      const causeType = obj.cause_type || '';
-      const causeForce = obj.cause_force || '';
-      const dmg = obj.damage_type || '';
-      const pos = (obj.pos && Array.isArray(obj.pos) && obj.pos.length === 2) ? ` @${obj.pos[0]},${obj.pos[1]}` : '';
-      let parts = [];
-      const causeText = cause || 'nieznana przyczyna';
-      parts.push(`${causeText}`);
-      if (causeForce) parts.push(`(${causeForce})`);
-      if (dmg) parts.push(`typ:${dmg}`);
-      const detail = parts.length ? ` — ${parts.join(' ')}` : '';
-      const content = `💀 ${player} zginął${detail}${pos}`;
-      postToDiscord(content, severity).catch(() => { });
-    } else if (t === 'research') {
-      const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
-      const tech = techLocalised || obj.technology || obj.technology_name || obj.research || '';
-      const techName = tech || 'nieznana technologia';
-      const force = obj.force || '';
-      const content = (force && force != 'player')
-        ? `🔬 ${force} odkrył ${techName}`
-        : `🔬 Odkryto ${techName}`;
-      postToDiscord(content, severity).catch(() => { });
-    } else if (t === 'evolution') {
-      if (!shouldNotifyEvolutionThreshold(obj)) return;
-      const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
-      const pct = formatEvolutionPercent(obj.evolution_factor);
-      const suffix = pct ? ` (EF=${pct}%)` : '';
-      const content = `🧬 ${msg}${suffix}`;
-      severity = 'critical';
-      postToDiscord(content, severity).catch(() => { });
+    };
+
+    if (handlers[t]) {
+      handlers[t]();
     } else {
-      // future events mapping
-      const content = `⚠️ ${player}: ${t}`;
-      severity = 'critical';
-      postToDiscord(content, severity).catch(() => { });
+      notify(`⚠️ ${player}: ${t}`, 'critical');
     }
   } catch (e) {
     console.error('handleEvent error:', e);
