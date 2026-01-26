@@ -16,7 +16,7 @@ const POLL_SECONDS = Number(process.env.POLL_SECONDS || 15);
 
 const TIMEZONE = process.env.TIMEZONE || 'Europe/Warsaw';
 const QUIET_HOURS_START = process.env.QUIET_HOURS_START || '23:00';
-const QUIET_HOURS_END = process.env.QUIET_HOURS_END || '08:00';
+const QUIET_HOURS_END = process.env.QUIET_HOURS_END || '09:00';
 const PING_ROLE_ID = process.env.PING_ROLE_ID || '';
 const PING_ON_JOIN = String(process.env.PING_ON_JOIN || 'false') === 'true';
 const PING_ON_CRITICAL_ONLY = String(process.env.PING_ON_CRITICAL_ONLY || 'true') === 'true';
@@ -158,11 +158,15 @@ function shouldNotifyEvolutionThreshold(obj) {
 
 async function postToDiscord(content, severity = 'info') {
   const now = Date.now();
+
+  const quiet = isQuietNow();
+  // During quiet hours only allow critical messages through
+  if (quiet && severity !== 'critical') return;
+
   const last = dedupMap.get(content) || 0;
   if (now - last < DEDUP_SECONDS * 1000) return;
   dedupMap.set(content, now);
 
-  const quiet = isQuietNow();
   const canPing = !!PING_ROLE_ID && !quiet && (!PING_ON_CRITICAL_ONLY || severity === 'critical' || (PING_ON_JOIN && severity === 'info'));
 
   const body = {
@@ -236,26 +240,29 @@ function handleEvent(obj) {
     if (!obj || !obj.type) return;
     const t = obj.type;
     const player = obj.player || 'unknown';
+    let severity = 'info';
 
     if (t === 'join') {
       const content = `🟢 ${player} wszedł na serwer`;
-      const severity = 'info';
-      const shouldPing = PING_ON_JOIN && !PING_ON_CRITICAL_ONLY;
+      severity = 'critical';
       postToDiscord(content, severity).catch(() => { });
     } else if (t === 'leave') {
+      severity = 'critical';
       const content = `⚪ ${player} wyszedł z serwera`;
-      postToDiscord(content, 'info').catch(() => { });
+      postToDiscord(content, severity).catch(() => { });
     } else if (t === 'afk') {
       const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
       const p = state.players[player] || { isAfk: false };
       if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
         p.isAfk = true;
         state.players[player] = p;
-        postToDiscord(`💤 ${player} AFK`, 'warning').catch(() => { });
+        severity = 'warning';
+        postToDiscord(`💤 ${player} AFK`, severity).catch(() => { });
       } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
         p.isAfk = false;
         state.players[player] = p;
-        postToDiscord(`🔔 ${player} wrócił z AFK`, 'warning').catch(() => { });
+        severity = 'warning';
+        postToDiscord(`🔔 ${player} wrócił z AFK`, severity).catch(() => { });
       }
     } else if (t === 'death') {
       const causeLocalised = (obj.cause_localised && String(obj.cause_localised).trim()) ? String(obj.cause_localised).trim() : '';
@@ -271,27 +278,29 @@ function handleEvent(obj) {
       if (dmg) parts.push(`typ:${dmg}`);
       const detail = parts.length ? ` — ${parts.join(' ')}` : '';
       const content = `💀 ${player} zginął${detail}${pos}`;
-      postToDiscord(content, 'critical').catch(() => { });
+      postToDiscord(content, severity).catch(() => { });
     } else if (t === 'research') {
       const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
       const tech = techLocalised || obj.technology || obj.technology_name || obj.research || '';
       const techName = tech || 'nieznana technologia';
       const force = obj.force || '';
-      const content = force
+      const content = (force && force != 'player')
         ? `🔬 ${force} odkrył ${techName}`
         : `🔬 Odkryto ${techName}`;
-      postToDiscord(content, 'info').catch(() => { });
+      postToDiscord(content, severity).catch(() => { });
     } else if (t === 'evolution') {
       if (!shouldNotifyEvolutionThreshold(obj)) return;
       const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
       const pct = formatEvolutionPercent(obj.evolution_factor);
       const suffix = pct ? ` (EF=${pct}%)` : '';
       const content = `🧬 ${msg}${suffix}`;
-      postToDiscord(content, 'warning').catch(() => { });
+      severity = 'critical';
+      postToDiscord(content, severity).catch(() => { });
     } else {
       // future events mapping
       const content = `⚠️ ${player}: ${t}`;
-      postToDiscord(content, 'critical').catch(() => { });
+      severity = 'critical';
+      postToDiscord(content, severity).catch(() => { });
     }
   } catch (e) {
     console.error('handleEvent error:', e);
