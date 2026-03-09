@@ -31,6 +31,22 @@ data:extend({
     order = "d"
   },
   {
+    type = "bool-setting",
+    name = "telemetry-afk-info-enabled",
+    setting_type = "runtime-global",
+    default_value = false,
+    order = "d-a"
+  },
+  {
+    type = "int-setting",
+    name = "telemetry-afk-info-threshold-seconds",
+    setting_type = "runtime-global",
+    default_value = 300,
+    minimum_value = 10,
+    maximum_value = 86400,
+    order = "d-b"
+  },
+  {
     type = "int-setting",
     name = "telemetry-max-bytes",
     setting_type = "runtime-global",
@@ -89,10 +105,18 @@ data:extend({
   },
   {
     type = "string-setting",
+    name = "telemetry-evolution-surface-names",
+    setting_type = "runtime-global",
+    default_value = "nauvis",
+    allow_blank = false,
+    order = "e-f"
+  },
+  {
+    type = "string-setting",
     name = "telemetry-evolution-force-name",
     setting_type = "runtime-global",
     default_value = "enemy",
     allow_blank = false,
-    order = "e-f"
+    order = "e-g"
   }
 })

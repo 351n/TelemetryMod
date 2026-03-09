@@ -24,6 +24,11 @@ const PING_ON_CRITICAL_ONLY = String(process.env.PING_ON_CRITICAL_ONLY || 'true'
 const AFK_ON_SECONDS = Number(process.env.AFK_ON_SECONDS || 300);
 const AFK_OFF_SECONDS = Number(process.env.AFK_OFF_SECONDS || 60);
 
+// Evolution surface whitelist (comma/space/semicolon-separated). When null, behave as today.
+const EVOLUTION_NOTIFY_SURFACES_RAW = process.env.EVOLUTION_NOTIFY_SURFACES || 'navius,gleba';
+const EVOLUTION_NOTIFY_SURFACES = EVOLUTION_NOTIFY_SURFACES_RAW ? EVOLUTION_NOTIFY_SURFACES_RAW.split(/[,\s;]+/).map(s => s.trim()).filter(Boolean) : null;
+const EVOLUTION_NOTIFY_SURFACES_SET = EVOLUTION_NOTIFY_SURFACES ? new Set(EVOLUTION_NOTIFY_SURFACES) : null;
+
 // SFTP config
 const SFTP_HOST = process.env.SFTP_HOST;
 const SFTP_PORT = Number(process.env.SFTP_PORT || 22);
@@ -54,6 +59,9 @@ let state = {
 // persisted summary of suppressed events during quiet hours
 state.suppressedEvents = state.suppressedEvents || [];
 state.wasQuiet = state.wasQuiet || false;
+// persisted sent ids for dedupe across restarts and last seen tick
+state.sentEventIds = state.sentEventIds || [];
+state.lastTick = state.lastTick || 0;
 
 async function loadState() {
   try {
@@ -121,6 +129,10 @@ function isQuietNow() {
 const dedupMap = new Map();
 const DEDUP_SECONDS = 10;
 
+// persistent dedupe: keep a capped list of recently-sent event ids across restarts
+const MAX_SENT_IDS = 2000;
+let sentIdSet = new Set();
+
 const EVOLUTION_NEW_TYPE_KEYS = new Set([
   'medium_biter',
   'small_spitter',
@@ -150,6 +162,11 @@ function formatEvolutionPercent(value) {
 
 function shouldNotifyEvolutionThreshold(obj) {
   if (!obj || obj.trigger !== 'threshold') return false;
+  // If an allowed-surface list is configured, only notify thresholds for those surfaces.
+  if (EVOLUTION_NOTIFY_SURFACES_SET) {
+    const surf = (obj.surface || '').toString();
+    if (!surf || !EVOLUTION_NOTIFY_SURFACES_SET.has(surf)) return false;
+  }
   if (obj.direction && obj.direction !== 'up') return false;
   const kind = obj.threshold_kind;
   if (kind === 'dominance') return true;
@@ -158,6 +175,25 @@ function shouldNotifyEvolutionThreshold(obj) {
     return EVOLUTION_NEW_TYPE_KEYS.has(key) || key.startsWith('tier_');
   }
   return false;
+}
+
+// Build a stable id for an event to deduplicate across rotations/restarts.
+// Uses `tick` when available plus a small type-specific key.
+function getEventId(obj) {
+  if (!obj || !obj.type) return null;
+  const tick = (typeof obj.tick !== 'undefined') ? String(obj.tick) : '0';
+  const type = obj.type;
+  let key = '';
+  if (type === 'research') key = (obj.technology_localised || obj.technology || '').trim();
+  else if (type === 'death') key = `${(obj.player||'')}:${(obj.cause_localised||obj.cause||'')}:${JSON.stringify(obj.pos||'')}`;
+  else if (type === 'join' || type === 'leave' || type === 'afk') key = (obj.player || '');
+  else if (type === 'evolution') {
+    const base = (obj.threshold_kind || obj.trigger || obj.message || '');
+    const surf = (obj.surface || '');
+    key = `${base}:${surf}`;
+  }
+  else key = JSON.stringify([obj.type, obj.player || '', obj.technology || obj.message || '']).slice(0, 200);
+  return `${tick}|${type}|${key}`;
 }
 
 function buildSuppressedSummary(events) {
@@ -348,7 +384,9 @@ function handleEvent(obj) {
         const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
         const pct = formatEvolutionPercent(obj.evolution_factor);
         const suffix = pct ? ` (EF=${pct}%)` : '';
-        notify(`🧬 ${msg}${suffix}`, 'critical', { type: 'evolution' });
+        const surface = obj.surface || '';
+        const surfaceSuffix = surface ? ` on ${surface}` : '';
+        notify(`🧬 ${msg}${suffix}${surfaceSuffix}`, 'critical', { type: 'evolution', surface: surface });
       }
     };
 
@@ -378,6 +416,32 @@ async function processBuffer(buf) {
     if (!line) continue;
     try {
       const obj = JSON.parse(line);
+
+      // detect tick reset / server restart: if tick decreases drastically, clear sent ids
+      if (typeof obj.tick === 'number') {
+        if (state.lastTick && obj.tick + 1000000 < state.lastTick) {
+          // significant decrease -> assume restart/semantic reset
+          state.sentEventIds = [];
+          sentIdSet.clear();
+          console.log('Detected tick reset / restart — clearing cached sent event ids');
+        }
+        state.lastTick = Math.max(state.lastTick || 0, obj.tick);
+      }
+
+      // dedupe using persisted sent ids
+      const id = getEventId(obj);
+      if (id && sentIdSet.has(id)) continue;
+
+      // mark as seen and persist a capped list
+      if (id) {
+        sentIdSet.add(id);
+        state.sentEventIds = state.sentEventIds || [];
+        state.sentEventIds.unshift(id);
+        if (state.sentEventIds.length > MAX_SENT_IDS) state.sentEventIds.length = MAX_SENT_IDS;
+        // persist async
+        saveState().catch(() => {});
+      }
+
       handleEvent(obj);
     } catch (e) {
       // ignore parse errors
@@ -388,6 +452,8 @@ async function processBuffer(buf) {
 
 async function loop() {
   await loadState();
+  // rebuild in-memory set after loading persisted state
+  sentIdSet = new Set(state.sentEventIds || []);
   console.log('Starting relay. Protocol:', PROTOCOL, 'remote:', REMOTE_PATH);
   // initialize wasQuiet from current time if not present
   state.wasQuiet = state.wasQuiet || isQuietNow();

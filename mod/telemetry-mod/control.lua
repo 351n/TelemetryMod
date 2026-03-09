@@ -12,6 +12,9 @@ local DEFAULT_LOG_FILE = "telemetry.jsonl"
 local DEFAULT_AFK_INTERVAL_SECONDS = 15
 local DEFAULT_DEBUG = false
 local DEFAULT_DEBUG_AFK = false
+local DEFAULT_AFK_INFO_ENABLED = false
+local DEFAULT_AFK_INFO_THRESHOLD_SECONDS = 300
+local DEFAULT_AFK_INFO_RETURN_SECONDS = 60
 local DEFAULT_MAX_BYTES = 50 * 1024 -- 50 KB
 local DEFAULT_MAX_AGE_SECONDS = 24 * 60 * 60 -- 24 hours
 
@@ -23,10 +26,14 @@ local DEFAULT_EVOLUTION_INCLUDE_DOMINANCE = true -- include "dominance change" t
 local DEFAULT_EVOLUTION_NOTIFY_CHAT = true -- emit chat/server messages on thresholds
 local DEFAULT_EVOLUTION_FORCE_NAME = "enemy" -- which force to observe (usually "enemy")
 local DEFAULT_EVOLUTION_SURFACE_NAME = "nauvis" -- which surface to observe for evolution
+local DEFAULT_EVOLUTION_SURFACE_NAMES = "nauvis" -- comma/space-separated surface names
 local LOG_FILE = DEFAULT_LOG_FILE
 local AFK_INTERVAL_TICKS = DEFAULT_AFK_INTERVAL_SECONDS * 60 -- ticks
 local DEBUG = DEFAULT_DEBUG
 local DEBUG_AFK = DEFAULT_DEBUG_AFK
+local AFK_INFO_ENABLED = DEFAULT_AFK_INFO_ENABLED
+local AFK_INFO_THRESHOLD_SECONDS = DEFAULT_AFK_INFO_THRESHOLD_SECONDS
+local AFK_INFO_RETURN_SECONDS = DEFAULT_AFK_INFO_RETURN_SECONDS
 local MAX_BYTES = DEFAULT_MAX_BYTES
 local MAX_AGE_SECONDS = DEFAULT_MAX_AGE_SECONDS
 
@@ -37,10 +44,14 @@ local EVOLUTION_INCLUDE_DOMINANCE = DEFAULT_EVOLUTION_INCLUDE_DOMINANCE
 local EVOLUTION_NOTIFY_CHAT = DEFAULT_EVOLUTION_NOTIFY_CHAT
 local EVOLUTION_FORCE_NAME = DEFAULT_EVOLUTION_FORCE_NAME
 local EVOLUTION_SURFACE_NAME = DEFAULT_EVOLUTION_SURFACE_NAME
+local EVOLUTION_SURFACE_NAMES = { DEFAULT_EVOLUTION_SURFACE_NAME }
+local EVOLUTION_SURFACE_NAMES_STR = DEFAULT_EVOLUTION_SURFACE_NAMES
 
 -- Keep track of last registered nth_tick values so setting changes do not leave stale handlers behind.
 local LAST_AFK_INTERVAL_TICKS = AFK_INTERVAL_TICKS
 local LAST_EVOLUTION_INTERVAL_TICKS = EVOLUTION_INTERVAL_TICKS
+
+local resolve_localised_or_request -- forward declaration
 
 -- Escape minimal set of characters for safe JSON strings
 local function escape_json_string(s)
@@ -54,11 +65,59 @@ local function escape_json_string(s)
   return s
 end
 
+local function is_localised(value)
+  return type(value) == "table"
+end
+
+local function localised_fallback(value)
+  if not is_localised(value) then
+    return tostring(value)
+  end
+  local key = value[1]
+  if key == "" then
+    local parts = {}
+    for i = 2, #value do
+      parts[#parts+1] = localised_fallback(value[i])
+    end
+    return table.concat(parts)
+  end
+  if type(key) == "string" then
+    if #value > 1 then
+      local params = {}
+      for i = 2, #value do
+        params[#params+1] = localised_fallback(value[i])
+      end
+      return key .. "(" .. table.concat(params, ",") .. ")"
+    end
+    return key
+  end
+  return tostring(value)
+end
+
+local function with_prefix(message)
+  if is_localised(message) then
+    return { "", { "telemetry-mod.prefix" }, " ", message }
+  end
+  return "[telemetry-mod] " .. tostring(message)
+end
+
+local function parse_surface_list(raw)
+  local list = {}
+  local value = tostring(raw or "")
+  for name in string.gmatch(value, "[^,%s;]+") do
+    list[#list+1] = name
+  end
+  if #list == 0 then
+    list[#list+1] = DEFAULT_EVOLUTION_SURFACE_NAME
+  end
+  return list
+end
+
 local function safe_game_print(msg)
   if not DEBUG then return end
   pcall(function()
     if game and game.print then
-      game.print("[telemetry-mod] " .. tostring(msg))
+      game.print(with_prefix(msg))
     end
   end)
 end
@@ -68,7 +127,7 @@ local function safe_log(msg)
   pcall(function()
     -- global log() writes to factorio-current.log
     if log then
-      log("[telemetry-mod] " .. tostring(msg))
+      log("[telemetry-mod] " .. localised_fallback(msg))
     end
   end)
 end
@@ -81,38 +140,38 @@ local EVOLUTION_THRESHOLD_EVENT_ID = script.generate_event_name()
 
 -- Threshold definitions. Values based on Factorio wiki enemies spawn chances / evolution curves.
 local EVOLUTION_THRESHOLDS_CORE = {
-  { value = 0.20, kind = "tier", key = "medium_biter", message = "Ewolucja obcych 20%: moga pojawic sie srednie bitery." },
-  { value = 0.25, kind = "tier", key = "small_spitter", message = "Ewolucja obcych 25%: moga pojawic sie male spitery." },
-  { value = 0.30, kind = "tier", key = "medium_worm", message = "Ewolucja obcych 30%: ekspansje moga miec srednie wormy." },
-  { value = 0.40, kind = "tier", key = "medium_spitter", message = "Ewolucja obcych 40%: moga pojawic sie srednie spitery." },
-  { value = 0.50, kind = "tier", key = "big_biter_spitter_worm", message = "Ewolucja obcych 50%: moga pojawic sie duze bitery/spitery oraz duze wormy." },
-  { value = 0.60, kind = "tier", key = "no_small_biter", message = "Ewolucja obcych 60%: male bitery przestaja byc spawnione." },
-  { value = 0.70, kind = "tier", key = "no_small_spitter", message = "Ewolucja obcych 70%: male spitery przestaja byc spawnione." },
-  { value = 0.90, kind = "tier", key = "behemoth", message = "Ewolucja obcych 90%: moga pojawic sie behemothy i behemoth wormy." }
+  { value = 0.20, kind = "tier", key = "medium_biter", message = { "telemetry-mod.evolution-core-medium-biter" } },
+  { value = 0.25, kind = "tier", key = "small_spitter", message = { "telemetry-mod.evolution-core-small-spitter" } },
+  { value = 0.30, kind = "tier", key = "medium_worm", message = { "telemetry-mod.evolution-core-medium-worm" } },
+  { value = 0.40, kind = "tier", key = "medium_spitter", message = { "telemetry-mod.evolution-core-medium-spitter" } },
+  { value = 0.50, kind = "tier", key = "big_biter_spitter_worm", message = { "telemetry-mod.evolution-core-big-biter-spitter-worm" } },
+  { value = 0.60, kind = "tier", key = "no_small_biter", message = { "telemetry-mod.evolution-core-no-small-biter" } },
+  { value = 0.70, kind = "tier", key = "no_small_spitter", message = { "telemetry-mod.evolution-core-no-small-spitter" } },
+  { value = 0.90, kind = "tier", key = "behemoth", message = { "telemetry-mod.evolution-core-behemoth" } }
 }
 
 local EVOLUTION_THRESHOLDS_RAMPANT_FIXED = {
-  { value = 0.10, kind = "tier", key = "tier_2", message = "Ewolucja obcych 10%: pojawia sie tier 2." },
-  { value = 0.22, kind = "tier", key = "tier_3", message = "Ewolucja obcych 22%: pojawia sie tier 3." },
-  { value = 0.38, kind = "tier", key = "tier_4", message = "Ewolucja obcych 38%: pojawia sie tier 4." },
-  { value = 0.47, kind = "tier", key = "tier_5", message = "Ewolucja obcych 47%: pojawia sie tier 5." },
-  { value = 0.65, kind = "tier", key = "tier_6", message = "Ewolucja obcych 65%: pojawia sie tier 6." },
-  { value = 0.74, kind = "tier", key = "tier_7", message = "Ewolucja obcych 74%: pojawia sie tier 7." },
-  { value = 0.80, kind = "tier", key = "tier_8", message = "Ewolucja obcych 80%: pojawia sie tier 8." },
-  { value = 0.85, kind = "tier", key = "tier_9", message = "Ewolucja obcych 85%: pojawia sie tier 9." },
-  { value = 0.91, kind = "tier", key = "tier_10", message = "Ewolucja obcych 91%: pojawia sie tier 10." },
-  { value = 0.936, kind = "tier", key = "tier_10_25", message = "Ewolucja obcych 93.6%: tier 10 pojawią się częściej." },
-  { value = 0.943, kind = "tier", key = "tier_10_33", message = "Ewolucja obcych 94.3%: tier 10 pojawia się wyraźnie częściej." },
-  { value = 0.955, kind = "tier", key = "tier_10_50", message = "Ewolucja obcych 95.5%: tier 10 dominuje." },
-  { value = 0.9705, kind = "tier", key = "tier_10_75", message = "Ewolucja obcych 97.05%: tier 10 zdecydowanie dominuje." }
+  { value = 0.10, kind = "tier", key = "tier_2", message = { "telemetry-mod.evolution-rampant-tier-2" } },
+  { value = 0.22, kind = "tier", key = "tier_3", message = { "telemetry-mod.evolution-rampant-tier-3" } },
+  { value = 0.38, kind = "tier", key = "tier_4", message = { "telemetry-mod.evolution-rampant-tier-4" } },
+  { value = 0.47, kind = "tier", key = "tier_5", message = { "telemetry-mod.evolution-rampant-tier-5" } },
+  { value = 0.65, kind = "tier", key = "tier_6", message = { "telemetry-mod.evolution-rampant-tier-6" } },
+  { value = 0.74, kind = "tier", key = "tier_7", message = { "telemetry-mod.evolution-rampant-tier-7" } },
+  { value = 0.80, kind = "tier", key = "tier_8", message = { "telemetry-mod.evolution-rampant-tier-8" } },
+  { value = 0.85, kind = "tier", key = "tier_9", message = { "telemetry-mod.evolution-rampant-tier-9" } },
+  { value = 0.91, kind = "tier", key = "tier_10", message = { "telemetry-mod.evolution-rampant-tier-10" } },
+  { value = 0.936, kind = "tier", key = "tier_10_25", message = { "telemetry-mod.evolution-rampant-tier-10-25" } },
+  { value = 0.943, kind = "tier", key = "tier_10_33", message = { "telemetry-mod.evolution-rampant-tier-10-33" } },
+  { value = 0.955, kind = "tier", key = "tier_10_50", message = { "telemetry-mod.evolution-rampant-tier-10-50" } },
+  { value = 0.9705, kind = "tier", key = "tier_10_75", message = { "telemetry-mod.evolution-rampant-tier-10-75" } }
 }
 
 local EVOLUTION_THRESHOLDS_DOMINANCE = {
-  { value = 0.36, kind = "dominance", key = "medium_biter_majority", message = "Ewolucja obcych ~36%: srednie bitery staja sie dominujace (ok. 50%)." },
-  { value = 0.68, kind = "dominance", key = "big_biter_majority", message = "Ewolucja obcych ~68%: duze bitery staja sie dominujace (ok. 50%)." },
-  { value = 0.78, kind = "dominance", key = "big_spitter_majority", message = "Ewolucja obcych ~78%: duze spitery staja sie dominujace (ok. 50%)." },
-  { value = 0.916, kind = "dominance", key = "behemoth_visible_10", message = "Ewolucja obcych ~91.6%: behemothy zaczynaja byc widoczne (~10%)." },
-  { value = 0.938, kind = "dominance", key = "behemoth_visible_20", message = "Ewolucja obcych ~93.8%: behemothy staja sie czestsze (~20%)." }
+  { value = 0.36, kind = "dominance", key = "medium_biter_majority", message = { "telemetry-mod.evolution-dominance-medium-biter-majority" } },
+  { value = 0.68, kind = "dominance", key = "big_biter_majority", message = { "telemetry-mod.evolution-dominance-big-biter-majority" } },
+  { value = 0.78, kind = "dominance", key = "big_spitter_majority", message = { "telemetry-mod.evolution-dominance-big-spitter-majority" } },
+  { value = 0.916, kind = "dominance", key = "behemoth_visible_10", message = { "telemetry-mod.evolution-dominance-behemoth-visible-10" } },
+  { value = 0.938, kind = "dominance", key = "behemoth_visible_20", message = { "telemetry-mod.evolution-dominance-behemoth-visible-20" } }
 }
 
 local function fmt_pct01(x)
@@ -201,7 +260,8 @@ pcall(function()
             min_delta = EVOLUTION_MIN_DELTA,
             include_dominance = EVOLUTION_INCLUDE_DOMINANCE,
             notify_chat = EVOLUTION_NOTIFY_CHAT,
-            force_name = EVOLUTION_FORCE_NAME
+            force_name = EVOLUTION_FORCE_NAME,
+            surface_names = EVOLUTION_SURFACE_NAMES_STR
           }
         end,
         get_evolution_thresholds = function()
@@ -272,12 +332,12 @@ local function write_json_line(line, suppress_debug)
     local ok, err = write_file_safe(LOG_FILE, line .. "\n", true)
     if ok then
       if not suppress_debug then
-        safe_game_print("wrote telemetry line")
-        safe_log("wrote telemetry line: " .. line)
+        safe_game_print({ "telemetry-mod.debug-wrote-line" })
+        safe_log({ "telemetry-mod.debug-wrote-line-with", line })
       end
     else
       if err and err ~= "no write backend" then
-        safe_log("failed to write telemetry line: " .. tostring(err))
+        safe_log({ "telemetry-mod.debug-write-line-failed", tostring(err) })
       end
     end
     return
@@ -329,12 +389,12 @@ local function write_json_line(line, suppress_debug)
     local ok, err = write_file_safe(LOG_FILE, content, false)
     if ok then
       if not suppress_debug then
-        safe_game_print("wrote telemetry buffer (" .. tostring(#entries) .. " lines)")
-        safe_log("wrote telemetry buffer, bytes=" .. tostring(global.telemetry_buffer.total_bytes))
+        safe_game_print({ "telemetry-mod.debug-wrote-buffer", tostring(#entries) })
+        safe_log({ "telemetry-mod.debug-wrote-buffer-bytes", tostring(global.telemetry_buffer.total_bytes) })
       end
     else
       if err and err ~= "no write backend" then
-        safe_log("failed to write telemetry buffer: " .. tostring(err))
+        safe_log({ "telemetry-mod.debug-write-buffer-failed", tostring(err) })
       end
     end
   end
@@ -377,6 +437,9 @@ local function write_evolution_telemetry_line(tick, trigger, force_name, evoluti
   if extra.message ~= nil then
     parts[#parts+1] = string.format(',"message":"%s"', escape_json_string(extra.message))
   end
+  if extra.surface ~= nil then
+    parts[#parts+1] = string.format(',"surface":"%s"', escape_json_string(extra.surface))
+  end
 
   parts[#parts+1] = "}"
   write_json_line(table.concat(parts, ""))
@@ -392,20 +455,43 @@ end
 
 local function ensure_evolution_state()
   if not global then return nil end
-  global.telemetry_evolution = global.telemetry_evolution or {
+  global.telemetry_evolution = global.telemetry_evolution or {}
+  local st = global.telemetry_evolution
+
+  -- Migrate older single-surface format to per-surface map
+  if st.last_checked_factor ~= nil or st.last_logged_factor ~= nil or st.unlogged_delta ~= nil or st.prev_poll_factor ~= nil then
+    st.surfaces = st.surfaces or {}
+    st.surfaces[DEFAULT_EVOLUTION_SURFACE_NAME] = {
+      last_checked_factor = st.last_checked_factor,
+      last_logged_factor = st.last_logged_factor,
+      unlogged_delta = st.unlogged_delta or 0,
+      prev_poll_factor = st.prev_poll_factor
+    }
+    st.last_checked_factor = nil
+    st.last_logged_factor = nil
+    st.unlogged_delta = nil
+    st.prev_poll_factor = nil
+  end
+
+  st.surfaces = st.surfaces or {}
+  return st
+end
+
+local function ensure_evolution_surface_state(surface_name)
+  if not global then return nil end
+  local st = ensure_evolution_state()
+  if not st then return nil end
+  st.surfaces = st.surfaces or {}
+  st.surfaces[surface_name] = st.surfaces[surface_name] or {
     last_checked_factor = nil,
     last_logged_factor = nil,
     unlogged_delta = 0,
     prev_poll_factor = nil
   }
-  return global.telemetry_evolution
+  return st.surfaces[surface_name]
 end
 
-local function maybe_emit_threshold(th, force_obj, current_factor, direction)
-  local tick = (game and game.tick) or 0
-  local force_name = (force_obj and force_obj.name) or (EVOLUTION_FORCE_NAME or "enemy")
-  local msg = th and th.message or ""
-
+local function emit_threshold(tick, force_name, current_factor, th, direction, msg_string, msg_localised, surface_name)
   -- Telemetry line (machine-readable + includes message for convenience)
   write_evolution_telemetry_line(tick, "threshold", force_name, current_factor, {
     threshold = th and th.value,
@@ -413,7 +499,8 @@ local function maybe_emit_threshold(th, force_obj, current_factor, direction)
     threshold_key = th and th.key,
     direction = direction or "up",
     include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
-    message = msg
+    message = msg_string or "",
+    surface = surface_name
   })
 
   -- Raise custom event for other mods to handle (they can ignore our message)
@@ -426,15 +513,62 @@ local function maybe_emit_threshold(th, force_obj, current_factor, direction)
     threshold_key = th and th.key,
     direction = direction or "up",
     include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
-    message = msg
+    message = msg_string or "",
+    surface = surface_name
   })
 
   -- Built-in chat message (optional)
-  if EVOLUTION_NOTIFY_CHAT and game and game.print and msg ~= "" then
+  if EVOLUTION_NOTIFY_CHAT and game and game.print and (msg_localised or (msg_string and msg_string ~= "")) then
     pcall(function()
-      game.print(string.format("[telemetry-mod] %s (EF=%s%%)", msg, fmt_pct01(current_factor)))
+      local pct = fmt_pct01(current_factor)
+      local base = msg_localised or msg_string
+      if surface_name and surface_name ~= "" and surface_name ~= DEFAULT_EVOLUTION_SURFACE_NAME then
+        if pct then
+          game.print(with_prefix({ "telemetry-mod.evolution-chat-surface", base, pct, surface_name }))
+        else
+          game.print(with_prefix({ "telemetry-mod.evolution-chat-surface-no-pct", base, surface_name }))
+        end
+      else
+        if pct then
+          game.print(with_prefix({ "telemetry-mod.evolution-chat", base, pct }))
+        else
+          game.print(with_prefix({ "telemetry-mod.evolution-chat-no-pct", base }))
+        end
+      end
     end)
   end
+end
+
+local function maybe_emit_threshold(th, force_obj, current_factor, direction, surface_name)
+  local tick = (game and game.tick) or 0
+  local force_name = (force_obj and force_obj.name) or (EVOLUTION_FORCE_NAME or "enemy")
+  local msg_localised = th and th.message or ""
+
+  local msg_string, pending = resolve_localised_or_request(msg_localised, force_obj)
+  if pending then
+    if not global then
+      msg_string = localised_fallback(msg_localised)
+      emit_threshold(tick, force_name, current_factor, th, direction, msg_string, msg_localised, surface_name)
+      return
+    end
+    global.pending_evolution_translations = global.pending_evolution_translations or {}
+    global.pending_evolution_translations[pending.id] = {
+      tick = tick,
+      request_tick = tick,
+      force_name = force_name,
+      surface = surface_name,
+      evolution_factor = current_factor,
+      threshold = th,
+      direction = direction or "up",
+      include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
+      message_localised = msg_localised,
+      locale = pending.locale,
+      player_index = pending.player_index
+    }
+    return
+  end
+
+  emit_threshold(tick, force_name, current_factor, th, direction, msg_string, msg_localised, surface_name)
 end
 
 local function evolution_poll(event)
@@ -442,61 +576,70 @@ local function evolution_poll(event)
   if not EVOLUTION_ENABLED then return end
 
   local force_obj = get_observed_force()
-  local raw_current = get_force_evolution_factor(force_obj, EVOLUTION_SURFACE_NAME)
-  local current = tonumber(raw_current) or 0
-  local st = ensure_evolution_state()
-  if not st then return end
-
-  local last_checked = st.last_checked_factor
-  if last_checked == nil then last_checked = current end
-
-  -- Accumulate small changes between logs to avoid dropping slow evolution drift.
-  st.unlogged_delta = st.unlogged_delta or 0
-  local prev_poll = st.prev_poll_factor
-  if prev_poll == nil then prev_poll = last_checked or current end
-  local delta_since_prev = current - prev_poll
-  st.prev_poll_factor = current
-  st.unlogged_delta = st.unlogged_delta + delta_since_prev
-
+  local thresholds = get_threshold_list()
   local min_delta = tonumber(EVOLUTION_MIN_DELTA) or 0
 
-  if math.abs(st.unlogged_delta) >= min_delta then
-    write_evolution_telemetry_line(game.tick, "poll", force_obj.name, current, {
-      delta = st.unlogged_delta,
-      include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
-    })
-    st.last_logged_factor = current
-    st.unlogged_delta = 0
-  else
-    safe_log("evolution_poll: accumulated delta below threshold — skipping poll log")
-  end
-
-  -- Threshold crossing detection
-  local thresholds = get_threshold_list()
-  if current >= last_checked then
-    for i = 1, #thresholds do
-      local th = thresholds[i]
-      local v = th and th.value
-      if v and last_checked < v and current >= v then
-        maybe_emit_threshold(th, force_obj, current, "up")
-      end
+  for _, surface_name in ipairs(EVOLUTION_SURFACE_NAMES or { DEFAULT_EVOLUTION_SURFACE_NAME }) do
+    local surface = nil
+    if surface_name and game and game.surfaces then
+      surface = game.surfaces[surface_name]
     end
-  else
-    -- Evolution decreased (rare). Emit DOWN events for thresholds crossed downward (no chat by default).
-    for i = #thresholds, 1, -1 do
-      local th = thresholds[i]
-      local v = th and th.value
-      if v and last_checked >= v and current < v then
-        -- Temporarily suppress chat if it's enabled (down events are usually noise)
-        local old_chat = EVOLUTION_NOTIFY_CHAT
-        EVOLUTION_NOTIFY_CHAT = false
-        maybe_emit_threshold(th, force_obj, current, "down")
-        EVOLUTION_NOTIFY_CHAT = old_chat
+    if surface then
+      local raw_current = get_force_evolution_factor(force_obj, surface_name)
+      local current = tonumber(raw_current) or 0
+      local st = ensure_evolution_surface_state(surface_name)
+      if not st then return end
+
+      local last_checked = st.last_checked_factor
+      if last_checked == nil then last_checked = current end
+
+      -- Accumulate small changes between logs to avoid dropping slow evolution drift.
+      st.unlogged_delta = st.unlogged_delta or 0
+      local prev_poll = st.prev_poll_factor
+      if prev_poll == nil then prev_poll = last_checked or current end
+      local delta_since_prev = current - prev_poll
+      st.prev_poll_factor = current
+      st.unlogged_delta = st.unlogged_delta + delta_since_prev
+
+      if math.abs(st.unlogged_delta) >= min_delta then
+        write_evolution_telemetry_line(game.tick, "poll", force_obj.name, current, {
+          delta = st.unlogged_delta,
+          include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
+          surface = surface_name
+        })
+        st.last_logged_factor = current
+        st.unlogged_delta = 0
+      else
+        safe_log({ "telemetry-mod.evolution-poll-skipped" })
       end
+
+      -- Threshold crossing detection
+      if current >= last_checked then
+        for i = 1, #thresholds do
+          local th = thresholds[i]
+          local v = th and th.value
+          if v and last_checked < v and current >= v then
+            maybe_emit_threshold(th, force_obj, current, "up", surface_name)
+          end
+        end
+      else
+        -- Evolution decreased (rare). Emit DOWN events for thresholds crossed downward (no chat by default).
+        for i = #thresholds, 1, -1 do
+          local th = thresholds[i]
+          local v = th and th.value
+          if v and last_checked >= v and current < v then
+            -- Temporarily suppress chat if it's enabled (down events are usually noise)
+            local old_chat = EVOLUTION_NOTIFY_CHAT
+            EVOLUTION_NOTIFY_CHAT = false
+            maybe_emit_threshold(th, force_obj, current, "down", surface_name)
+            EVOLUTION_NOTIFY_CHAT = old_chat
+          end
+        end
+      end
+
+      st.last_checked_factor = current
     end
   end
-
-  st.last_checked_factor = current
 end
 
 local function safe_player_name_from_index(index)
@@ -515,6 +658,7 @@ end
 -- Default to English, fallback Polish if no English-speaking players are connected.
 local PREFERRED_TLM_LOCALES = { "en", "pl" }
 local DEFAULT_DEATH_TRANSLATION_TIMEOUT_TICKS = 10 * 60 -- 10 seconds
+local DEFAULT_EVOLUTION_TRANSLATION_TIMEOUT_TICKS = 10 * 60 -- 10 seconds
 
 local function tlm_locale_rank(loc)
   if not loc then return #PREFERRED_TLM_LOCALES + 1 end
@@ -562,6 +706,23 @@ local function pick_translator_player_tlm(force_obj)
   end
 
   return best and best.p or nil
+end
+
+resolve_localised_or_request = function(localised_value, force_obj)
+  if not is_localised(localised_value) then
+    return tostring(localised_value), nil
+  end
+  local translator = pick_translator_player_tlm(force_obj)
+  if translator and translator.valid and translator.request_translation then
+    local id = nil
+    local ok = pcall(function()
+      id = translator.request_translation(localised_value)
+    end)
+    if ok and id then
+      return nil, { id = id, locale = translator.locale, player_index = translator.index }
+    end
+  end
+  return localised_fallback(localised_value), nil
 end
 
 local function get_entity_translation_cached(locale, entity_name)
@@ -676,6 +837,20 @@ local function flush_stale_death_translations()
       -- Fallback: localised = internal name
       write_death_telemetry_line(meta.tick or now, meta.player, meta.info, meta.info and meta.info.cause_name)
       global.pending_death_translations[id] = nil
+    end
+  end
+end
+
+-- Prevent losing evolution threshold events if translation never arrives
+local function flush_stale_evolution_translations()
+  if not global or not global.pending_evolution_translations or not game or not game.tick then return end
+  local now = game.tick
+  local timeout = DEFAULT_EVOLUTION_TRANSLATION_TIMEOUT_TICKS
+  for id, meta in pairs(global.pending_evolution_translations) do
+    if meta and meta.request_tick and (now - meta.request_tick) > timeout then
+      local msg_string = localised_fallback(meta.message_localised or "")
+      emit_threshold(meta.tick or now, meta.force_name, meta.evolution_factor or 0, meta.threshold, meta.direction, msg_string, meta.message_localised, meta.surface)
+      global.pending_evolution_translations[id] = nil
     end
   end
 end
@@ -919,22 +1094,42 @@ local function on_string_translated(event)
   -- Death translation results (cause_localised)
   if global.pending_death_translations then
     local meta = global.pending_death_translations[event.id]
-    if not meta then return end
-    global.pending_death_translations[event.id] = nil
+    if meta then
+      global.pending_death_translations[event.id] = nil
 
-    if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
-      return
+      if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
+        return
+      end
+
+      local info = meta.info or {}
+      local cause_name = info.cause_name or "unknown"
+      local translated = cause_name
+      if event.translated and event.result then
+        translated = event.result
+        put_entity_translation_cached(meta.locale, cause_name, translated)
+      end
+
+      write_death_telemetry_line(meta.tick, meta.player, info, translated)
     end
+  end
 
-    local info = meta.info or {}
-    local cause_name = info.cause_name or "unknown"
-    local translated = cause_name
-    if event.translated and event.result then
-      translated = event.result
-      put_entity_translation_cached(meta.locale, cause_name, translated)
+  -- Evolution threshold translation results (message)
+  if global.pending_evolution_translations then
+    local meta = global.pending_evolution_translations[event.id]
+    if meta then
+      global.pending_evolution_translations[event.id] = nil
+
+      if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
+        return
+      end
+
+      local msg_string = localised_fallback(meta.message_localised or "")
+      if event.translated and event.result then
+        msg_string = event.result
+      end
+
+      emit_threshold(meta.tick or ((game and game.tick) or 0), meta.force_name, meta.evolution_factor or 0, meta.threshold, meta.direction, msg_string, meta.message_localised, meta.surface)
     end
-
-    write_death_telemetry_line(meta.tick, meta.player, info, translated)
   end
 end
 
@@ -969,6 +1164,7 @@ local function afk_poll(event)
   if not game then return end
   flush_stale_research_translations()
   flush_stale_death_translations()
+  flush_stale_evolution_translations()
   for _, player in pairs(game.connected_players) do
     if player and player.valid then
       local afk_ticks = tonumber(player.afk_time) or 0
@@ -982,6 +1178,24 @@ local function afk_poll(event)
       )
       -- suppress debug output for AFK lines unless explicitly enabled
       write_json_line(line, not DEBUG_AFK)
+
+      if AFK_INFO_ENABLED and game and game.print then
+        global.telemetry_afk_state = global.telemetry_afk_state or {}
+        local st = global.telemetry_afk_state[player.index] or { is_afk = false }
+        if (not st.is_afk) and afk_seconds >= (AFK_INFO_THRESHOLD_SECONDS or DEFAULT_AFK_INFO_THRESHOLD_SECONDS) then
+          st.is_afk = true
+          global.telemetry_afk_state[player.index] = st
+          pcall(function()
+            game.print(with_prefix({ "telemetry-mod.afk-on", player.name or "unknown", tostring(afk_seconds) }))
+          end)
+        elseif st.is_afk and afk_seconds <= (AFK_INFO_RETURN_SECONDS or DEFAULT_AFK_INFO_RETURN_SECONDS) then
+          st.is_afk = false
+          global.telemetry_afk_state[player.index] = st
+          pcall(function()
+            game.print(with_prefix({ "telemetry-mod.afk-off", player.name or "unknown" }))
+          end)
+        end
+      end
     end
   end
 end
@@ -1005,34 +1219,46 @@ script.on_init(function()
   -- Translation state for research telemetry
   global.tech_translation_cache = global.tech_translation_cache or {}
   global.pending_research_translations = global.pending_research_translations or {}
+  -- Translation state for evolution telemetry
+  global.pending_evolution_translations = global.pending_evolution_translations or {}
+  -- AFK info state
+  global.telemetry_afk_state = global.telemetry_afk_state or {}
   -- Evolution telemetry state
   global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
   pcall(function()
     local f = get_observed_force()
     if f and f.valid then
       -- Baseline to current factor to avoid "catch-up spam" after enabling the mod.
-      local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
-      global.telemetry_evolution.last_checked_factor = current
-      global.telemetry_evolution.last_logged_factor = current
-      global.telemetry_evolution.unlogged_delta = 0
-      global.telemetry_evolution.prev_poll_factor = current
-      write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, current, {
-        include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
-      })
+      ensure_evolution_state()
+      for _, surface_name in ipairs(EVOLUTION_SURFACE_NAMES or { DEFAULT_EVOLUTION_SURFACE_NAME }) do
+        local surface = game.surfaces[surface_name]
+        if surface then
+          local st = ensure_evolution_surface_state(surface_name)
+          local current = tonumber(get_force_evolution_factor(f, surface_name)) or 0
+          st.last_checked_factor = current
+          st.last_logged_factor = current
+          st.unlogged_delta = 0
+          st.prev_poll_factor = current
+          write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, current, {
+            include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
+            surface = surface_name
+          })
+        end
+      end
     end
   end)
 
   -- Try to clear the log using available backend (overwrite=false to clear)
   local ok, err = write_file_safe(LOG_FILE, "", false)
   if ok then
-    safe_game_print("telemetry-mod initialized; telemetry log cleared")
-    safe_log("telemetry-mod initialized; telemetry log cleared")
+    safe_game_print({ "telemetry-mod.init-cleared" })
+    safe_log({ "telemetry-mod.init-cleared" })
   else
     -- If there's no backend, avoid noisy errors; still notify presence in chat when possible
     if err and err ~= "no write backend" then
-      safe_log("telemetry-mod init: write_file failed: " .. tostring(err))
+      safe_log({ "telemetry-mod.init-write-failed", tostring(err) })
     end
-    safe_game_print("telemetry-mod initialized (write_file may be unavailable on this runtime)")
+    safe_game_print({ "telemetry-mod.init-no-backend" })
   end
 end)
 
@@ -1045,6 +1271,8 @@ script.on_configuration_changed(function(data)
     global.tech_translation_cache = global.tech_translation_cache or {}
     global.pending_research_translations = global.pending_research_translations or {}
     global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
+    global.pending_evolution_translations = global.pending_evolution_translations or {}
+    global.telemetry_afk_state = global.telemetry_afk_state or {}
   end
 
   -- Re-apply settings and re-register nth_tick handlers safely
@@ -1052,8 +1280,8 @@ script.on_configuration_changed(function(data)
     if apply_settings then apply_settings() end
   end)
 
-  safe_game_print("telemetry-mod configuration changed; settings re-applied")
-  safe_log("telemetry-mod configuration changed; settings re-applied")
+  safe_game_print({ "telemetry-mod.config-changed" })
+  safe_log({ "telemetry-mod.config-changed" })
 end)
 
 -- Read runtime-global settings (if available) and apply them at runtime.
@@ -1078,6 +1306,8 @@ apply_settings = function()
 
   DEBUG = read_setting("telemetry-debug", DEFAULT_DEBUG) == true
   DEBUG_AFK = read_setting("telemetry-debug-afk", DEFAULT_DEBUG_AFK) == true
+  AFK_INFO_ENABLED = read_setting("telemetry-afk-info-enabled", DEFAULT_AFK_INFO_ENABLED) == true
+  AFK_INFO_THRESHOLD_SECONDS = tonumber(read_setting("telemetry-afk-info-threshold-seconds", DEFAULT_AFK_INFO_THRESHOLD_SECONDS)) or DEFAULT_AFK_INFO_THRESHOLD_SECONDS
 
   -- max bytes and max age (seconds)
   MAX_BYTES = tonumber(read_setting("telemetry-max-bytes", DEFAULT_MAX_BYTES)) or DEFAULT_MAX_BYTES
@@ -1095,6 +1325,9 @@ apply_settings = function()
   EVOLUTION_MIN_DELTA = tonumber(read_setting("telemetry-evolution-min-delta", DEFAULT_EVOLUTION_MIN_DELTA)) or DEFAULT_EVOLUTION_MIN_DELTA
   EVOLUTION_INCLUDE_DOMINANCE = read_setting("telemetry-evolution-include-dominance", DEFAULT_EVOLUTION_INCLUDE_DOMINANCE) == true
   EVOLUTION_NOTIFY_CHAT = read_setting("telemetry-evolution-notify-chat", DEFAULT_EVOLUTION_NOTIFY_CHAT) == true
+  local old_surface_names_str = EVOLUTION_SURFACE_NAMES_STR
+  EVOLUTION_SURFACE_NAMES_STR = tostring(read_setting("telemetry-evolution-surface-names", DEFAULT_EVOLUTION_SURFACE_NAMES) or DEFAULT_EVOLUTION_SURFACE_NAMES)
+  EVOLUTION_SURFACE_NAMES = parse_surface_list(EVOLUTION_SURFACE_NAMES_STR)
   EVOLUTION_FORCE_NAME = tostring(read_setting("telemetry-evolution-force-name", DEFAULT_EVOLUTION_FORCE_NAME) or DEFAULT_EVOLUTION_FORCE_NAME)
 
   -- Avoid leaving stale nth_tick handlers behind
@@ -1108,19 +1341,26 @@ apply_settings = function()
   end
 
   -- If the observed force changed, baseline the evolution state (prevents retro-trigger spam).
-  if global and old_force_name ~= EVOLUTION_FORCE_NAME then
+  if global and (old_force_name ~= EVOLUTION_FORCE_NAME or old_surface_names_str ~= EVOLUTION_SURFACE_NAMES_STR) then
     pcall(function()
       local f = get_observed_force()
       if f and f.valid then
-        global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil, unlogged_delta = 0, prev_poll_factor = nil }
-        local current = tonumber(get_force_evolution_factor(f, EVOLUTION_SURFACE_NAME)) or 0
-        global.telemetry_evolution.last_checked_factor = current
-        global.telemetry_evolution.last_logged_factor = current
-        global.telemetry_evolution.unlogged_delta = 0
-        global.telemetry_evolution.prev_poll_factor = current
-        write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, current, {
-          include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true
-        })
+        ensure_evolution_state()
+        for _, surface_name in ipairs(EVOLUTION_SURFACE_NAMES or { DEFAULT_EVOLUTION_SURFACE_NAME }) do
+          local surface = game.surfaces[surface_name]
+          if surface then
+            local st = ensure_evolution_surface_state(surface_name)
+            local current = tonumber(get_force_evolution_factor(f, surface_name)) or 0
+            st.last_checked_factor = current
+            st.last_logged_factor = current
+            st.unlogged_delta = 0
+            st.prev_poll_factor = current
+            write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, current, {
+              include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
+              surface = surface_name
+            })
+          end
+        end
       end
     end)
   end
@@ -1134,7 +1374,7 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   if not event or not event.setting then return end
   if string.find(event.setting, "telemetry-") then
     apply_settings()
-    safe_game_print("telemetry-mod settings updated")
-    safe_log("telemetry-mod settings updated")
+    safe_game_print({ "telemetry-mod.settings-updated" })
+    safe_log({ "telemetry-mod.settings-updated" })
   end
 end)
