@@ -16,13 +16,18 @@ const POLL_SECONDS = Number(process.env.POLL_SECONDS || 15);
 
 const TIMEZONE = process.env.TIMEZONE || 'Europe/Warsaw';
 const QUIET_HOURS_START = process.env.QUIET_HOURS_START || '23:00';
-const QUIET_HOURS_END = process.env.QUIET_HOURS_END || '08:00';
+const QUIET_HOURS_END = process.env.QUIET_HOURS_END || '09:00';
 const PING_ROLE_ID = process.env.PING_ROLE_ID || '';
 const PING_ON_JOIN = String(process.env.PING_ON_JOIN || 'false') === 'true';
 const PING_ON_CRITICAL_ONLY = String(process.env.PING_ON_CRITICAL_ONLY || 'true') === 'true';
 
 const AFK_ON_SECONDS = Number(process.env.AFK_ON_SECONDS || 300);
 const AFK_OFF_SECONDS = Number(process.env.AFK_OFF_SECONDS || 60);
+
+// Evolution surface whitelist (comma/space/semicolon-separated). When null, behave as today.
+const EVOLUTION_NOTIFY_SURFACES_RAW = process.env.EVOLUTION_NOTIFY_SURFACES || 'navius,gleba';
+const EVOLUTION_NOTIFY_SURFACES = EVOLUTION_NOTIFY_SURFACES_RAW ? EVOLUTION_NOTIFY_SURFACES_RAW.split(/[,\s;]+/).map(s => s.trim()).filter(Boolean) : null;
+const EVOLUTION_NOTIFY_SURFACES_SET = EVOLUTION_NOTIFY_SURFACES ? new Set(EVOLUTION_NOTIFY_SURFACES) : null;
 
 // SFTP config
 const SFTP_HOST = process.env.SFTP_HOST;
@@ -50,6 +55,13 @@ let state = {
   players: {},
   lastFileSize: 0
 };
+
+// persisted summary of suppressed events during quiet hours
+state.suppressedEvents = state.suppressedEvents || [];
+state.wasQuiet = state.wasQuiet || false;
+// persisted sent ids for dedupe across restarts and last seen tick
+state.sentEventIds = state.sentEventIds || [];
+state.lastTick = state.lastTick || 0;
 
 async function loadState() {
   try {
@@ -117,6 +129,10 @@ function isQuietNow() {
 const dedupMap = new Map();
 const DEDUP_SECONDS = 10;
 
+// persistent dedupe: keep a capped list of recently-sent event ids across restarts
+const MAX_SENT_IDS = 2000;
+let sentIdSet = new Set();
+
 const EVOLUTION_NEW_TYPE_KEYS = new Set([
   'medium_biter',
   'small_spitter',
@@ -146,6 +162,11 @@ function formatEvolutionPercent(value) {
 
 function shouldNotifyEvolutionThreshold(obj) {
   if (!obj || obj.trigger !== 'threshold') return false;
+  // If an allowed-surface list is configured, only notify thresholds for those surfaces.
+  if (EVOLUTION_NOTIFY_SURFACES_SET) {
+    const surf = (obj.surface || '').toString();
+    if (!surf || !EVOLUTION_NOTIFY_SURFACES_SET.has(surf)) return false;
+  }
   if (obj.direction && obj.direction !== 'up') return false;
   const kind = obj.threshold_kind;
   if (kind === 'dominance') return true;
@@ -156,13 +177,91 @@ function shouldNotifyEvolutionThreshold(obj) {
   return false;
 }
 
-async function postToDiscord(content, severity = 'info') {
+// Build a stable id for an event to deduplicate across rotations/restarts.
+// Uses `tick` when available plus a small type-specific key.
+function getEventId(obj) {
+  if (!obj || !obj.type) return null;
+  const tick = (typeof obj.tick !== 'undefined') ? String(obj.tick) : '0';
+  const type = obj.type;
+  let key = '';
+  if (type === 'research') key = (obj.technology_localised || obj.technology || '').trim();
+  else if (type === 'death') key = `${(obj.player||'')}:${(obj.cause_localised||obj.cause||'')}:${JSON.stringify(obj.pos||'')}`;
+  else if (type === 'join' || type === 'leave' || type === 'afk') key = (obj.player || '');
+  else if (type === 'evolution') {
+    const base = (obj.threshold_kind || obj.trigger || obj.message || '');
+    const surf = (obj.surface || '');
+    key = `${base}:${surf}`;
+  }
+  else key = JSON.stringify([obj.type, obj.player || '', obj.technology || obj.message || '']).slice(0, 200);
+  return `${tick}|${type}|${key}`;
+}
+
+function buildSuppressedSummary(events) {
+  if (!events || !events.length) return null;
+  const researchSet = new Set();
+  let deathCount = 0;
+  const deathPlayers = [];
+  const others = [];
+
+  for (const e of events) {
+    const meta = e.meta || {};
+    const content = e.content || '';
+    if (meta.type === 'research' && meta.tech) {
+      researchSet.add(meta.tech);
+    } else if (meta.type === 'death') {
+      deathCount++;
+      if (meta.player) deathPlayers.push(meta.player);
+    } else if (content && content.startsWith('🔬')) {
+      // try to parse tech name
+      const m = content.match(/(?:odkrył|Odkryto)\s+(.+)$/i);
+      if (m && m[1]) researchSet.add(m[1].trim()); else others.push(content);
+    } else if (content && content.startsWith('💀')) {
+      deathCount++;
+      const m = content.match(/💀\s+([^\s]+)\s/);
+      if (m && m[1]) deathPlayers.push(m[1]);
+    } else {
+      others.push(content);
+    }
+  }
+
+  let lines = [];
+  lines.push('Podsumowanie z quiet hours:');
+  if (researchSet.size) {
+    lines.push('Odkryte technologie:');
+    for (const t of researchSet) lines.push(`- ${t}`);
+  }
+  if (deathCount) {
+    lines.push(`Śmierci graczy: ${deathCount}` + (deathPlayers.length ? ` (lista: ${[...new Set(deathPlayers)].join(', ')})` : ''));
+  }
+  if (others.length) {
+    lines.push('Inne zdarzenia:');
+    for (const o of others.slice(0, 10)) lines.push(`- ${o}`);
+    if (others.length > 10) lines.push(`... i ${others.length - 10} innych`);
+  }
+
+  return lines.join('\n');
+}
+
+async function postToDiscord(content, severity = 'info', meta = null) {
   const now = Date.now();
+
+  const quiet = isQuietNow();
+  // During quiet hours only allow critical messages through; record suppressed events
+  if (quiet && severity !== 'critical') {
+    try {
+      state.suppressedEvents = state.suppressedEvents || [];
+      state.suppressedEvents.push({ time: now, severity, content, meta });
+      await saveState();
+    } catch (e) {
+      // ignore save errors
+    }
+    return;
+  }
+
   const last = dedupMap.get(content) || 0;
   if (now - last < DEDUP_SECONDS * 1000) return;
   dedupMap.set(content, now);
 
-  const quiet = isQuietNow();
   const canPing = !!PING_ROLE_ID && !quiet && (!PING_ON_CRITICAL_ONLY || severity === 'critical' || (PING_ON_JOIN && severity === 'info'));
 
   const body = {
@@ -237,61 +336,68 @@ function handleEvent(obj) {
     const t = obj.type;
     const player = obj.player || 'unknown';
 
-    if (t === 'join') {
-      const content = `🟢 ${player} wszedł na serwer`;
-      const severity = 'info';
-      const shouldPing = PING_ON_JOIN && !PING_ON_CRITICAL_ONLY;
+    function notify(content, severity = 'info') {
       postToDiscord(content, severity).catch(() => { });
-    } else if (t === 'leave') {
-      const content = `⚪ ${player} wyszedł z serwera`;
-      postToDiscord(content, 'info').catch(() => { });
-    } else if (t === 'afk') {
-      const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
-      const p = state.players[player] || { isAfk: false };
-      if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
-        p.isAfk = true;
-        state.players[player] = p;
-        postToDiscord(`💤 ${player} AFK`, 'warning').catch(() => { });
-      } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
-        p.isAfk = false;
-        state.players[player] = p;
-        postToDiscord(`🔔 ${player} wrócił z AFK`, 'warning').catch(() => { });
+    }
+
+    const handlers = {
+      join: () => notify(`🟢 ${player} wszedł na serwer`, 'critical'),
+      leave: () => notify(`⚪ ${player} wyszedł z serwera`, 'critical'),
+      afk: () => {
+        const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
+        const p = state.players[player] || { isAfk: false };
+        if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
+          p.isAfk = true;
+          state.players[player] = p;
+          notify(`💤 ${player} AFK`, 'warning', { type: 'afk', player });
+        } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
+          p.isAfk = false;
+          state.players[player] = p;
+          notify(`🔔 ${player} wrócił z AFK`, 'warning', { type: 'afk', player });
+        }
+      },
+      death: () => {
+        const causeLocalised = (obj.cause_localised && String(obj.cause_localised).trim()) ? String(obj.cause_localised).trim() : '';
+        const cause = causeLocalised || obj.cause || obj.cause_name || '';
+        const causeForce = obj.cause_force || '';
+        const dmg = obj.damage_type || '';
+        const pos = (obj.pos && Array.isArray(obj.pos) && obj.pos.length === 2) ? ` @${obj.pos[0]},${obj.pos[1]}` : '';
+        const causeText = cause || 'nieznana przyczyna';
+        const parts = [causeText];
+        if (causeForce) parts.push(`(${causeForce})`);
+        if (dmg) parts.push(`typ:${dmg}`);
+        const detail = parts.length ? ` — ${parts.join(' ')}` : '';
+        notify(`💀 ${player} zginął${detail}${pos}`, 'info', { type: 'death', player, detail });
+      },
+      research: () => {
+        const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
+        const tech = techLocalised || obj.technology || obj.technology_name || obj.research || '';
+        const techName = tech || 'nieznana technologia';
+        const force = obj.force || '';
+        const content = (force && force != 'player')
+          ? `🔬 ${force} odkrył ${techName}`
+          : `🔬 Odkryto ${techName}`;
+        notify(content, 'info', { type: 'research', tech: techName });
+      },
+      evolution: () => {
+        if (!shouldNotifyEvolutionThreshold(obj)) return;
+        const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
+        const pct = formatEvolutionPercent(obj.evolution_factor);
+        const suffix = pct ? ` (EF=${pct}%)` : '';
+        const surface = obj.surface || '';
+        const surfaceSuffix = surface ? ` on ${surface}` : '';
+        notify(`🧬 ${msg}${suffix}${surfaceSuffix}`, 'critical', { type: 'evolution', surface: surface });
       }
-    } else if (t === 'death') {
-      const causeLocalised = (obj.cause_localised && String(obj.cause_localised).trim()) ? String(obj.cause_localised).trim() : '';
-      const cause = causeLocalised || obj.cause || obj.cause_name || '';
-      const causeType = obj.cause_type || '';
-      const causeForce = obj.cause_force || '';
-      const dmg = obj.damage_type || '';
-      const pos = (obj.pos && Array.isArray(obj.pos) && obj.pos.length === 2) ? ` @${obj.pos[0]},${obj.pos[1]}` : '';
-      let parts = [];
-      const causeText = cause || 'nieznana przyczyna';
-      parts.push(`${causeText}`);
-      if (causeForce) parts.push(`(${causeForce})`);
-      if (dmg) parts.push(`typ:${dmg}`);
-      const detail = parts.length ? ` — ${parts.join(' ')}` : '';
-      const content = `💀 ${player} zginął${detail}${pos}`;
-      postToDiscord(content, 'critical').catch(() => { });
-    } else if (t === 'research') {
-      const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
-      const tech = techLocalised || obj.technology || obj.technology_name || obj.research || '';
-      const techName = tech || 'nieznana technologia';
-      const force = obj.force || '';
-      const content = force
-        ? `🔬 ${force} odkrył ${techName}`
-        : `🔬 Odkryto ${techName}`;
-      postToDiscord(content, 'info').catch(() => { });
-    } else if (t === 'evolution') {
-      if (!shouldNotifyEvolutionThreshold(obj)) return;
-      const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
-      const pct = formatEvolutionPercent(obj.evolution_factor);
-      const suffix = pct ? ` (EF=${pct}%)` : '';
-      const content = `🧬 ${msg}${suffix}`;
-      postToDiscord(content, 'warning').catch(() => { });
+    };
+
+    if (handlers[t]) {
+      // use notify wrapper that attaches meta
+      function notify(content, severity = 'info', meta = null) {
+        postToDiscord(content, severity, meta);
+      }
+      handlers[t]();
     } else {
-      // future events mapping
-      const content = `⚠️ ${player}: ${t}`;
-      postToDiscord(content, 'critical').catch(() => { });
+      postToDiscord(`⚠️ ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
     }
   } catch (e) {
     console.error('handleEvent error:', e);
@@ -310,6 +416,32 @@ async function processBuffer(buf) {
     if (!line) continue;
     try {
       const obj = JSON.parse(line);
+
+      // detect tick reset / server restart: if tick decreases drastically, clear sent ids
+      if (typeof obj.tick === 'number') {
+        if (state.lastTick && obj.tick + 1000000 < state.lastTick) {
+          // significant decrease -> assume restart/semantic reset
+          state.sentEventIds = [];
+          sentIdSet.clear();
+          console.log('Detected tick reset / restart — clearing cached sent event ids');
+        }
+        state.lastTick = Math.max(state.lastTick || 0, obj.tick);
+      }
+
+      // dedupe using persisted sent ids
+      const id = getEventId(obj);
+      if (id && sentIdSet.has(id)) continue;
+
+      // mark as seen and persist a capped list
+      if (id) {
+        sentIdSet.add(id);
+        state.sentEventIds = state.sentEventIds || [];
+        state.sentEventIds.unshift(id);
+        if (state.sentEventIds.length > MAX_SENT_IDS) state.sentEventIds.length = MAX_SENT_IDS;
+        // persist async
+        saveState().catch(() => {});
+      }
+
       handleEvent(obj);
     } catch (e) {
       // ignore parse errors
@@ -320,10 +452,31 @@ async function processBuffer(buf) {
 
 async function loop() {
   await loadState();
+  // rebuild in-memory set after loading persisted state
+  sentIdSet = new Set(state.sentEventIds || []);
   console.log('Starting relay. Protocol:', PROTOCOL, 'remote:', REMOTE_PATH);
+  // initialize wasQuiet from current time if not present
+  state.wasQuiet = state.wasQuiet || isQuietNow();
+  await saveState();
 
   while (true) {
     try {
+      // check quiet-hours transition: if we were quiet and now are not, post summary
+      const nowQuiet = isQuietNow();
+      if (state.wasQuiet && !nowQuiet) {
+        try {
+          if (state.suppressedEvents && state.suppressedEvents.length) {
+            const summary = buildSuppressedSummary(state.suppressedEvents);
+            if (summary) await postToDiscord(summary, 'info');
+          }
+        } catch (e) {
+          console.error('Error sending quiet-hours summary:', e);
+        }
+        state.suppressedEvents = [];
+        await saveState();
+      }
+      state.wasQuiet = nowQuiet;
+
       let readResult;
       if (PROTOCOL === 'sftp') {
         readResult = await retry(() => sftpReadRange(state.offset), 'sftp-read', 5);
