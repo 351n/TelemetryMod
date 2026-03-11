@@ -1,6 +1,7 @@
 -- Factorio 2.0+: persistent mod state lives in the `storage` table (it was called `global` before 2.0).
 -- This mod code still uses `global` internally, so we alias it to `storage` when running on 2.0.
 if not global and storage then global = storage end
+-- luacheck: globals game script remote defines rendering commands global storage helpers log
 
 -- ...existing code...
 -- telemetry-mod: runtime-only telemetry logger
