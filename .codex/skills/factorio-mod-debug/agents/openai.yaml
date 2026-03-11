@@ -1,0 +1,4 @@
+interface:
+  display_name: "Factorio Mod Debug"
+  short_description: "Diagnose Factorio mod bugs, crashes, and save-safe fixes"
+  default_prompt: "Diagnose this Factorio mod issue with stage-aware root-cause analysis and the smallest save-safe patch."
