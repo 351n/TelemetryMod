@@ -57,12 +57,12 @@ local emit_external_notify -- forward declaration
 
 local common = require("runtime.common")
 local evolution_runtime = require("runtime.evolution_thresholds")
-local notify_runtime = require("runtime.notify")
+local notify_runtime = require("runtime.events.notify")
 local write_backend_runtime = require("runtime.write_backend")
 local jsonl_buffer_runtime = require("runtime.jsonl_buffer")
 local translation_runtime = require("runtime.translation_runtime")
-local death_telemetry_runtime = require("runtime.death_telemetry")
-local research_telemetry_runtime = require("runtime.research_telemetry")
+local death_telemetry_runtime = require("runtime.events.death")
+local research_telemetry_runtime = require("runtime.events.research")
 local lifecycle_runtime = require("runtime.lifecycle")
 
 local escape_json_string = common.escape_json_string

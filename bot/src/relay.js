@@ -274,7 +274,7 @@ function getEventId(obj) {
   const type = obj.type;
   let key = '';
   if (type === 'research') key = (obj.technology_localised || obj.technology || '').trim();
-  else if (type === 'death') key = `${(obj.player||'')}:${(obj.cause_localised||obj.cause||'')}:${JSON.stringify(obj.pos||'')}`;
+  else if (type === 'death') key = `${(obj.player||'')}:${(obj.cause_localised||obj.cause||'')}:${JSON.stringify(obj.pos||'')}:${(obj.surface||'')}`;
   else if (type === 'join' || type === 'leave' || type === 'afk') key = (obj.player || '');
   else if (type === 'desync') {
     const reasonKey = (obj.reason !== undefined && obj.reason !== null && obj.reason !== '')
@@ -515,13 +515,15 @@ function handleEvent(obj) {
         const cause = causeLocalised || obj.cause || obj.cause_name || '';
         const causeForce = obj.cause_force || '';
         const dmg = obj.damage_type || '';
+        const surface = (obj.surface && String(obj.surface).trim()) ? String(obj.surface).trim() : '';
         const pos = (obj.pos && Array.isArray(obj.pos) && obj.pos.length === 2) ? ` @${obj.pos[0]},${obj.pos[1]}` : '';
+        const surfaceSuffix = surface ? ` [${surface}]` : '';
         const causeText = cause || 'nieznana przyczyna';
         const parts = [causeText];
         if (causeForce) parts.push(`(${causeForce})`);
         if (dmg) parts.push(`typ:${dmg}`);
         const detail = parts.length ? ` - ${parts.join(' ')}` : '';
-        notify(`[DEATH] ${player} zginal${detail}${pos}`, 'info', { type: 'death', player, detail });
+        notify(`[DEATH] ${player} zginal${detail}${pos}${surfaceSuffix}`, 'info', { type: 'death', player, detail, surface });
       },
       research: () => {
         const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
