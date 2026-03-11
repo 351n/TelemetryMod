@@ -68,13 +68,14 @@ remote.call("telemetry_mod", "notify", {
 - `runtime/jsonl_buffer.lua` - bounded JSONL buffer writer (size/age pruning + flush).
 - `runtime/translation_runtime.lua` - translation request/caching flow + stale pending resolution.
 - `runtime/lifecycle.lua` - event registration + init/config/runtime-setting lifecycle wiring.
+- `runtime/events/join.lua` - join event output.
+- `runtime/events/leave.lua` - leave event output.
+- `runtime/events/desync.lua` - strict desync detection/output.
+- `runtime/events/afk.lua` - periodic AFK polling/output.
+- `runtime/events/evolution.lua` - evolution polling, threshold crossings and chat/event emission.
 - `runtime/events/notify.lua` - normalization and emission of `type:"notify"` telemetry.
 - `runtime/events/death.lua` - death event enrichment and output formatting.
 - `runtime/events/research.lua` - research event extraction and output formatting.
-- `runtime/notify.lua` - compatibility shim for old `runtime.notify` import path.
-- `runtime/notify/core.lua` - compatibility shim for old `runtime.notify.core` import path.
-- `runtime/death_telemetry.lua` - compatibility shim for old `runtime.death_telemetry` import path.
-- `runtime/research_telemetry.lua` - compatibility shim for old `runtime.research_telemetry` import path.
 - `settings.lua` - potential runtime settings (if present).
 - `locale/` - localization and translations.
 - `pack-mod.ps1` - helper script for packaging the mod (in the `mod/` folder).
