@@ -24,6 +24,7 @@ Behavior
 Events mapping
 - join  -> 🟢 <player> wszedł na serwer
 - leave -> ⚪ <player> wyszedł z serwera
+- desync -> 🛑 <player> rozłączył się przez desync (`reason`, `reason_id`)
 - afk   -> keeps per-player AFK state and emits transitions only:
   - `afk_seconds >= AFK_ON_SECONDS` and previously not AFK -> 💬 "💤 <player> AFK"
   - `afk_seconds <= AFK_OFF_SECONDS` and previously AFK -> 🔔 "🔔 <player> wrócił z AFK"

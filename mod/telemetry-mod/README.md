@@ -3,8 +3,9 @@
 Lightweight, runtime-only Factorio mod that writes one JSON object per line to `script-output/telemetry.jsonl`.
 
 **Overview**
-- Records small telemetry events (examples: `join`, `leave`, `afk`, `death`, `research`, `evolution`) in JSON Lines format so external relays can read and forward them.
+- Records small telemetry events (examples: `join`, `leave`, `desync`, `afk`, `death`, `research`, `evolution`) in JSON Lines format so external relays can read and forward them.
 - Emits evolution events (`type: "evolution"`) for periodic polling and on threshold crossings; evolution events may include optional dominance information.
+- Emits `type: "desync"` on `on_pre_player_left_game` only when disconnect reason is `desync_limit_reached` (strict mode), with fields `reason` and `reason_id`.
 
 **Install / Packaging**
 1. Pack the `telemetry-mod` folder as a ZIP (or copy the folder) into Factorio's `mods` directory.
@@ -29,6 +30,7 @@ Lightweight, runtime-only Factorio mod that writes one JSON object per line to `
 {"tick":1234,"type":"join","player":"PlayerOne"}
 {"tick":1240,"type":"afk","player":"PlayerOne","afk_ticks":900,"afk_seconds":15}
 {"tick":2000,"type":"leave","player":"PlayerOne"}
+{"tick":2050,"type":"desync","player":"PlayerOne","reason":"desync_limit_reached","reason_id":123}
 {"tick":3500,"type":"evolution","trigger":"threshold","force":"enemy","evolution_factor":0.5,"threshold":0.5,"threshold_kind":"tier","threshold_key":"big_biter_spitter_worm","direction":"up","include_dominance":true,"message":"Enemy evolution 50%: big biters/spitters and big worms may appear."}
 
 **Localization**

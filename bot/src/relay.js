@@ -187,6 +187,12 @@ function getEventId(obj) {
   if (type === 'research') key = (obj.technology_localised || obj.technology || '').trim();
   else if (type === 'death') key = `${(obj.player||'')}:${(obj.cause_localised||obj.cause||'')}:${JSON.stringify(obj.pos||'')}`;
   else if (type === 'join' || type === 'leave' || type === 'afk') key = (obj.player || '');
+  else if (type === 'desync') {
+    const reasonKey = (obj.reason !== undefined && obj.reason !== null && obj.reason !== '')
+      ? obj.reason
+      : (obj.reason_id !== undefined ? obj.reason_id : '');
+    key = `${(obj.player || '')}:${reasonKey}`;
+  }
   else if (type === 'evolution') {
     const base = (obj.threshold_kind || obj.trigger || obj.message || '');
     const surf = (obj.surface || '');
@@ -343,6 +349,16 @@ function handleEvent(obj) {
     const handlers = {
       join: () => notify(`🟢 ${player} wszedł na serwer`, 'critical'),
       leave: () => notify(`⚪ ${player} wyszedł z serwera`, 'critical'),
+      desync: () => {
+        const reason = (obj.reason && String(obj.reason).trim()) ? String(obj.reason).trim() : '';
+        const reasonIdRaw = Number(obj.reason_id);
+        const reasonId = Number.isFinite(reasonIdRaw) ? reasonIdRaw : null;
+        const reasonBits = [];
+        if (reason) reasonBits.push(reason);
+        if (reasonId !== null) reasonBits.push(`id:${reasonId}`);
+        const reasonSuffix = reasonBits.length ? ` (${reasonBits.join(', ')})` : '';
+        notify(`🛑 ${player} rozłączył się przez desync${reasonSuffix}`, 'critical');
+      },
       afk: () => {
         const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
         const p = state.players[player] || { isAfk: false };
