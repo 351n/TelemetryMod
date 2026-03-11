@@ -1,6 +1,6 @@
 {
   "name": "telemetry-mod",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "title": "Telemetry Mod",
   "author": "auto-generated",
   "description": "Runtime-only mod that logs telemetry events (join/leave/afk/research/death) to script-output/telemetry.jsonl (one JSON object per line).",
