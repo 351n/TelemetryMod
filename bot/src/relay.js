@@ -202,6 +202,16 @@ function getEventId(obj) {
   return `${tick}|${type}|${key}`;
 }
 
+function isSuppressedAfkEvent(event) {
+  if (!event) return false;
+  const metaType = event.meta && event.meta.type ? String(event.meta.type) : '';
+  if (metaType === 'afk') return true;
+
+  // Backward compatibility: older entries might not have meta.
+  const content = String(event.content || '');
+  return /\bAFK\b/i.test(content);
+}
+
 function buildSuppressedSummary(events) {
   if (!events || !events.length) return null;
   const researchSet = new Set();
@@ -210,6 +220,10 @@ function buildSuppressedSummary(events) {
   const others = [];
 
   for (const e of events) {
+    if (isSuppressedAfkEvent(e)) {
+      continue;
+    }
+
     const meta = e.meta || {};
     const content = e.content || '';
     if (meta.type === 'research' && meta.tech) {
@@ -228,6 +242,10 @@ function buildSuppressedSummary(events) {
     } else {
       others.push(content);
     }
+  }
+
+  if (!researchSet.size && !deathCount && !others.length) {
+    return null;
   }
 
   let lines = [];
@@ -254,6 +272,10 @@ async function postToDiscord(content, severity = 'info', meta = null) {
   const quiet = isQuietNow();
   // During quiet hours only allow critical messages through; record suppressed events
   if (quiet && severity !== 'critical') {
+    const isAfkMeta = meta && meta.type === 'afk';
+    if (isAfkMeta) {
+      return;
+    }
     try {
       state.suppressedEvents = state.suppressedEvents || [];
       state.suppressedEvents.push({ time: now, severity, content, meta });
@@ -342,9 +364,9 @@ function handleEvent(obj) {
     const t = obj.type;
     const player = obj.player || 'unknown';
 
-    function notify(content, severity = 'info') {
-      postToDiscord(content, severity).catch(() => { });
-    }
+    const notify = (content, severity = 'info', meta = null) => {
+      postToDiscord(content, severity, meta).catch(() => { });
+    };
 
     const handlers = {
       join: () => notify(`🟢 ${player} wszedł na serwer`, 'critical'),
@@ -407,13 +429,9 @@ function handleEvent(obj) {
     };
 
     if (handlers[t]) {
-      // use notify wrapper that attaches meta
-      function notify(content, severity = 'info', meta = null) {
-        postToDiscord(content, severity, meta);
-      }
       handlers[t]();
     } else {
-      postToDiscord(`⚠️ ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
+      notify(`⚠️ ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
     }
   } catch (e) {
     console.error('handleEvent error:', e);
