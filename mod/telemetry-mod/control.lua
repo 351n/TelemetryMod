@@ -53,65 +53,27 @@ local LAST_AFK_INTERVAL_TICKS = AFK_INTERVAL_TICKS
 local LAST_EVOLUTION_INTERVAL_TICKS = EVOLUTION_INTERVAL_TICKS
 
 local resolve_localised_or_request -- forward declaration
+local emit_external_notify -- forward declaration
 
--- Escape minimal set of characters for safe JSON strings
-local function escape_json_string(s)
-  if s == nil then return "" end
-  s = tostring(s)
-  -- order matters: escape backslash first
-  s = s:gsub("\\", "\\\\")
-  s = s:gsub('"', '\\"')
-  s = s:gsub("\n", "\\n")
-  s = s:gsub("\r", "\\r")
-  return s
-end
+local common = require("runtime.common")
+local evolution_runtime = require("runtime.evolution_thresholds")
+local notify_runtime = require("runtime.notify")
+local write_backend_runtime = require("runtime.write_backend")
+local jsonl_buffer_runtime = require("runtime.jsonl_buffer")
 
-local function is_localised(value)
-  return type(value) == "table"
-end
-
-local function localised_fallback(value)
-  if not is_localised(value) then
-    return tostring(value)
-  end
-  local key = value[1]
-  if key == "" then
-    local parts = {}
-    for i = 2, #value do
-      parts[#parts+1] = localised_fallback(value[i])
-    end
-    return table.concat(parts)
-  end
-  if type(key) == "string" then
-    if #value > 1 then
-      local params = {}
-      for i = 2, #value do
-        params[#params+1] = localised_fallback(value[i])
-      end
-      return key .. "(" .. table.concat(params, ",") .. ")"
-    end
-    return key
-  end
-  return tostring(value)
-end
+local escape_json_string = common.escape_json_string
+local is_localised = common.is_localised
+local localised_fallback = common.localised_fallback
+local fmt_pct01 = common.fmt_pct01
+local notify_api = nil
+local telemetry_writer = nil
 
 local function with_prefix(message)
-  if is_localised(message) then
-    return { "", { "telemetry-mod.prefix" }, " ", message }
-  end
-  return "[telemetry-mod] " .. tostring(message)
+  return common.with_prefix(message, "telemetry-mod.prefix")
 end
 
 local function parse_surface_list(raw)
-  local list = {}
-  local value = tostring(raw or "")
-  for name in string.gmatch(value, "[^,%s;]+") do
-    list[#list+1] = name
-  end
-  if #list == 0 then
-    list[#list+1] = DEFAULT_EVOLUTION_SURFACE_NAME
-  end
-  return list
+  return common.parse_surface_list(raw, DEFAULT_EVOLUTION_SURFACE_NAME)
 end
 
 local function safe_game_print(msg)
@@ -138,105 +100,15 @@ end
 --   local id = remote.call("telemetry_mod","get_evolution_event_id")
 --   script.on_event(id, function(e) ... end)
 local EVOLUTION_THRESHOLD_EVENT_ID = script.generate_event_name()
-
--- Threshold definitions. Values based on Factorio wiki enemies spawn chances / evolution curves.
-local EVOLUTION_THRESHOLDS_CORE = {
-  { value = 0.20, kind = "tier", key = "medium_biter", message = { "telemetry-mod.evolution-core-medium-biter" } },
-  { value = 0.25, kind = "tier", key = "small_spitter", message = { "telemetry-mod.evolution-core-small-spitter" } },
-  { value = 0.30, kind = "tier", key = "medium_worm", message = { "telemetry-mod.evolution-core-medium-worm" } },
-  { value = 0.40, kind = "tier", key = "medium_spitter", message = { "telemetry-mod.evolution-core-medium-spitter" } },
-  { value = 0.50, kind = "tier", key = "big_biter_spitter_worm", message = { "telemetry-mod.evolution-core-big-biter-spitter-worm" } },
-  { value = 0.60, kind = "tier", key = "no_small_biter", message = { "telemetry-mod.evolution-core-no-small-biter" } },
-  { value = 0.70, kind = "tier", key = "no_small_spitter", message = { "telemetry-mod.evolution-core-no-small-spitter" } },
-  { value = 0.90, kind = "tier", key = "behemoth", message = { "telemetry-mod.evolution-core-behemoth" } }
-}
-
-local EVOLUTION_THRESHOLDS_RAMPANT_FIXED = {
-  { value = 0.10, kind = "tier", key = "tier_2", message = { "telemetry-mod.evolution-rampant-tier-2" } },
-  { value = 0.22, kind = "tier", key = "tier_3", message = { "telemetry-mod.evolution-rampant-tier-3" } },
-  { value = 0.38, kind = "tier", key = "tier_4", message = { "telemetry-mod.evolution-rampant-tier-4" } },
-  { value = 0.47, kind = "tier", key = "tier_5", message = { "telemetry-mod.evolution-rampant-tier-5" } },
-  { value = 0.65, kind = "tier", key = "tier_6", message = { "telemetry-mod.evolution-rampant-tier-6" } },
-  { value = 0.74, kind = "tier", key = "tier_7", message = { "telemetry-mod.evolution-rampant-tier-7" } },
-  { value = 0.80, kind = "tier", key = "tier_8", message = { "telemetry-mod.evolution-rampant-tier-8" } },
-  { value = 0.85, kind = "tier", key = "tier_9", message = { "telemetry-mod.evolution-rampant-tier-9" } },
-  { value = 0.91, kind = "tier", key = "tier_10", message = { "telemetry-mod.evolution-rampant-tier-10" } },
-  { value = 0.936, kind = "tier", key = "tier_10_25", message = { "telemetry-mod.evolution-rampant-tier-10-25" } },
-  { value = 0.943, kind = "tier", key = "tier_10_33", message = { "telemetry-mod.evolution-rampant-tier-10-33" } },
-  { value = 0.955, kind = "tier", key = "tier_10_50", message = { "telemetry-mod.evolution-rampant-tier-10-50" } },
-  { value = 0.9705, kind = "tier", key = "tier_10_75", message = { "telemetry-mod.evolution-rampant-tier-10-75" } }
-}
-
-local EVOLUTION_THRESHOLDS_DOMINANCE = {
-  { value = 0.36, kind = "dominance", key = "medium_biter_majority", message = { "telemetry-mod.evolution-dominance-medium-biter-majority" } },
-  { value = 0.68, kind = "dominance", key = "big_biter_majority", message = { "telemetry-mod.evolution-dominance-big-biter-majority" } },
-  { value = 0.78, kind = "dominance", key = "big_spitter_majority", message = { "telemetry-mod.evolution-dominance-big-spitter-majority" } },
-  { value = 0.916, kind = "dominance", key = "behemoth_visible_10", message = { "telemetry-mod.evolution-dominance-behemoth-visible-10" } },
-  { value = 0.938, kind = "dominance", key = "behemoth_visible_20", message = { "telemetry-mod.evolution-dominance-behemoth-visible-20" } }
-}
-
-local function fmt_pct01(x)
-  if x == nil then return "?" end
-  local pct = math.floor((tonumber(x) or 0) * 1000 + 0.5) / 10 -- 0.1%
-  return tostring(pct)
-end
-
+local TELEMETRY_NOTIFY_EVENT_ID = script.generate_event_name()
 local function get_observed_force()
-  if not game or not game.forces then return nil end
-  if EVOLUTION_FORCE_NAME and game.forces[EVOLUTION_FORCE_NAME] then
-    return game.forces[EVOLUTION_FORCE_NAME]
-  end
-  return game.forces.enemy
+  return evolution_runtime.get_observed_force(EVOLUTION_FORCE_NAME)
 end
 
-local function get_force_evolution_factor(force_obj, surface_name)
-  if not (force_obj and force_obj.valid) then return nil end
-  local surface = nil
-  if surface_name and game and game.surfaces then
-    surface = game.surfaces[surface_name]
-  end
-  if force_obj.get_evolution_factor then
-    local ok, value = pcall(function()
-      if surface then
-        return force_obj.get_evolution_factor(surface)
-      end
-      return force_obj.get_evolution_factor()
-    end)
-    if ok then return value end
-  end
-  local ok, value = pcall(function()
-    return force_obj.evolution_factor
-  end)
-  if ok then return value end
-  return nil
-end
-
-local function is_rampant_fixed_loaded()
-  if script and script.active_mods then
-    return script.active_mods["RampantFixed"] ~= nil
-  end
-  if game and game.active_mods then
-    return game.active_mods["RampantFixed"] ~= nil
-  end
-  return false
-end
-
-local function get_core_thresholds()
-  if is_rampant_fixed_loaded() then
-    return EVOLUTION_THRESHOLDS_RAMPANT_FIXED
-  end
-  return EVOLUTION_THRESHOLDS_CORE
-end
+local get_force_evolution_factor = evolution_runtime.get_force_evolution_factor
 
 local function get_threshold_list()
-  local list = {}
-  local core = get_core_thresholds()
-  for i = 1, #core do list[#list+1] = core[i] end
-  if (not is_rampant_fixed_loaded()) and EVOLUTION_INCLUDE_DOMINANCE then
-    for i = 1, #EVOLUTION_THRESHOLDS_DOMINANCE do list[#list+1] = EVOLUTION_THRESHOLDS_DOMINANCE[i] end
-  end
-  table.sort(list, function(a, b) return (a.value or 0) < (b.value or 0) end)
-  return list
+  return evolution_runtime.get_threshold_list(EVOLUTION_INCLUDE_DOMINANCE == true)
 end
 
 -- Remote interface for other mods / scripts
@@ -249,6 +121,7 @@ pcall(function()
     if not exists then
       remote.add_interface("telemetry_mod", {
         get_evolution_event_id = function() return EVOLUTION_THRESHOLD_EVENT_ID end,
+        get_notify_event_id = function() return TELEMETRY_NOTIFY_EVENT_ID end,
         get_enemy_evolution = function()
           local f = get_observed_force()
           if not f then return nil end
@@ -267,140 +140,80 @@ pcall(function()
         end,
         get_evolution_thresholds = function()
           return get_threshold_list()
+        end,
+        notify = function(payload)
+          if not emit_external_notify then
+            return { ok = false, error = "notify backend not ready" }
+          end
+          local ok, err = emit_external_notify(payload, "remote")
+          return { ok = ok, error = err }
         end
       })
     end
   end
 end)
 
--- Check once whether game.write_file is available in this runtime.
--- We wrap the check in pcall because indexing the userdata may throw on some runtimes.
--- Detect which write_file backend is available in this runtime.
--- Factorio 2.0 moved write_file to `helpers.write_file`; older runtimes used `game.write_file`.
--- We detect once and cache the backend in WRITE_BACKEND.
-local WRITE_BACKEND = nil -- "helpers", "game", or false
-local function detect_write_backend()
-  if WRITE_BACKEND ~= nil then
-    return WRITE_BACKEND
-  end
-  -- Check helpers.write_file first (Factorio 2.0+)
-  local ok, result = pcall(function()
-    return (helpers ~= nil) and (type(helpers.write_file) == "function")
-  end)
-  if ok and result then
-    WRITE_BACKEND = "helpers"
-    return WRITE_BACKEND
-  end
-  -- Fallback: check game.write_file (older runtimes)
-  ok, result = pcall(function()
-    return (game ~= nil) and (type(game.write_file) == "function")
-  end)
-  if ok and result then
-    WRITE_BACKEND = "game"
-    return WRITE_BACKEND
-  end
-  WRITE_BACKEND = false
-  return WRITE_BACKEND
-end
+local write_backend = write_backend_runtime.new()
+local write_file_safe = write_backend.write_file_safe
 
-local function write_file_safe(filename, content, append)
-  local backend = detect_write_backend()
-  if not backend then
-    return false, "no write backend"
-  end
-  if backend == "helpers" then
-    local ok, err = pcall(function()
-      helpers.write_file(filename, content, append)
-    end)
-    return ok, err
-  elseif backend == "game" then
-    local ok, err = pcall(function()
-      game.write_file(filename, content, append)
-    end)
-    return ok, err
-  end
-  return false, "unsupported backend"
+local function ensure_telemetry_writer()
+  if telemetry_writer then return telemetry_writer end
+  telemetry_writer = jsonl_buffer_runtime.new({
+    write_file_safe = write_file_safe,
+    safe_game_print = safe_game_print,
+    safe_log = safe_log,
+    get_tick = function()
+      return (game and game.tick) or 0
+    end,
+    get_config = function()
+      return {
+        log_file = LOG_FILE,
+        max_bytes = MAX_BYTES,
+        max_age_seconds = MAX_AGE_SECONDS,
+        default_max_bytes = DEFAULT_MAX_BYTES,
+        default_max_age_seconds = DEFAULT_MAX_AGE_SECONDS
+      }
+    end
+  })
+  return telemetry_writer
 end
 
 local function write_json_line(line, suppress_debug)
-  -- Append a single JSON line (ensure newline at end)
-  -- suppress_debug = true means do NOT emit chat/log debug for this write
-  suppress_debug = (suppress_debug == true)
-  -- Buffer the line in memory (persisted in `global`) and flush the buffer
-  -- by overwriting the file. This lets us bound the file by size and age.
-  if not global then
-    -- if global storage unavailable, fall back to best-effort direct write
-    local ok, err = write_file_safe(LOG_FILE, line .. "\n", true)
-    if ok then
-      if not suppress_debug then
-        safe_game_print({ "telemetry-mod.debug-wrote-line" })
-        safe_log({ "telemetry-mod.debug-wrote-line-with", line })
-      end
-    else
-      if err and err ~= "no write backend" then
-        safe_log({ "telemetry-mod.debug-write-line-failed", tostring(err) })
-      end
-    end
-    return
-  end
+  local writer = ensure_telemetry_writer()
+  writer.write_json_line(line, suppress_debug)
+end
 
-  -- Ensure buffer structure
-  global.telemetry_buffer = global.telemetry_buffer or { entries = {}, total_bytes = 0 }
-  local entry = { line = line, tick = (game and game.tick) or 0, bytes = (#line + 1) }
-  table.insert(global.telemetry_buffer.entries, entry)
-  global.telemetry_buffer.total_bytes = (global.telemetry_buffer.total_bytes or 0) + entry.bytes
-
-  -- Prune by age (ticks) and by size (bytes)
-  local function prune_buffer()
-    local entries = global.telemetry_buffer.entries
-    if not entries then return end
-    local max_age_ticks = (MAX_AGE_SECONDS or DEFAULT_MAX_AGE_SECONDS) * 60
-    local cutoff_tick = nil
-    if game and game.tick and max_age_ticks and max_age_ticks > 0 then
-      cutoff_tick = game.tick - max_age_ticks
-    end
-    -- drop entries older than cutoff
-    while #entries > 0 do
-      local e = entries[1]
-      if cutoff_tick and e.tick < cutoff_tick then
-        global.telemetry_buffer.total_bytes = global.telemetry_buffer.total_bytes - e.bytes
-        table.remove(entries, 1)
-      else
-        break
+local function ensure_notify_api()
+  if notify_api then return notify_api end
+  notify_api = notify_runtime.new({
+    write_json_line = write_json_line,
+    escape_json_string = escape_json_string,
+    localised_fallback = localised_fallback,
+    safe_log = safe_log,
+    raise_event = function(data)
+      if script and script.raise_event then
+        script.raise_event(TELEMETRY_NOTIFY_EVENT_ID, {
+          tick = data.tick,
+          source = data.source,
+          severity = data.severity,
+          message = data.message,
+          origin = data.origin,
+          player = data.player,
+          force = data.force,
+          surface = data.surface,
+          category = data.category,
+          code = data.code,
+          tags = data.tags
+        })
       end
     end
-    -- drop oldest until under size limit
-    local max_bytes = MAX_BYTES or DEFAULT_MAX_BYTES
-    while global.telemetry_buffer.total_bytes > max_bytes and #entries > 0 do
-      local e = table.remove(entries, 1)
-      global.telemetry_buffer.total_bytes = global.telemetry_buffer.total_bytes - e.bytes
-    end
-  end
+  })
+  return notify_api
+end
 
-  prune_buffer()
-
-  -- Flush buffer by overwriting the log file with all kept lines
-  local function flush_buffer_to_file()
-    local entries = global.telemetry_buffer.entries
-    if not entries then return end
-    local content = ""
-    for i = 1, #entries do
-      content = content .. entries[i].line .. "\n"
-    end
-    local ok, err = write_file_safe(LOG_FILE, content, false)
-    if ok then
-      if not suppress_debug then
-        safe_game_print({ "telemetry-mod.debug-wrote-buffer", tostring(#entries) })
-        safe_log({ "telemetry-mod.debug-wrote-buffer-bytes", tostring(global.telemetry_buffer.total_bytes) })
-      end
-    else
-      if err and err ~= "no write backend" then
-        safe_log({ "telemetry-mod.debug-write-buffer-failed", tostring(err) })
-      end
-    end
-  end
-
-  flush_buffer_to_file()
+emit_external_notify = function(payload, origin)
+  local api = ensure_notify_api()
+  return api.emit(payload, origin)
 end
 
 -- Evolution telemetry (enemy evolution factor) ---------------------------------
@@ -1278,6 +1091,8 @@ script.on_init(function()
   global.pending_evolution_translations = global.pending_evolution_translations or {}
   -- AFK info state
   global.telemetry_afk_state = global.telemetry_afk_state or {}
+  -- Foundation for custom telemetry producers (remote notify/entity signals in future)
+  global.telemetry_notify_state = global.telemetry_notify_state or {}
   -- Evolution telemetry state
   global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
   pcall(function()
@@ -1328,6 +1143,7 @@ script.on_configuration_changed(function(data)
     global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
     global.pending_evolution_translations = global.pending_evolution_translations or {}
     global.telemetry_afk_state = global.telemetry_afk_state or {}
+    global.telemetry_notify_state = global.telemetry_notify_state or {}
   end
 
   -- Re-apply settings and re-register nth_tick handlers safely

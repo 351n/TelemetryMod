@@ -4,6 +4,7 @@ Lightweight, runtime-only Factorio mod that writes one JSON object per line to `
 
 **Overview**
 - Records small telemetry events (examples: `join`, `leave`, `desync`, `afk`, `death`, `research`, `evolution`) in JSON Lines format so external relays can read and forward them.
+- Provides a remote API for other runtime mods to emit `notify` telemetry lines without writing files directly.
 - Emits evolution events (`type: "evolution"`) for periodic polling and on threshold crossings; evolution events may include optional dominance information.
 - Emits `type: "desync"` on `on_pre_player_left_game` only when disconnect reason is `desync_limit_reached` (strict mode), with fields `reason` and `reason_id`.
 
@@ -32,6 +33,23 @@ Lightweight, runtime-only Factorio mod that writes one JSON object per line to `
 {"tick":2000,"type":"leave","player":"PlayerOne"}
 {"tick":2050,"type":"desync","player":"PlayerOne","reason":"desync_limit_reached","reason_id":123}
 {"tick":3500,"type":"evolution","trigger":"threshold","force":"enemy","evolution_factor":0.5,"threshold":0.5,"threshold_kind":"tier","threshold_key":"big_biter_spitter_worm","direction":"up","include_dominance":true,"message":"Enemy evolution 50%: big biters/spitters and big worms may appear."}
+{"tick":3600,"type":"notify","source":"my_mod","severity":"warning","message":"Rocket silo low power","origin":"remote","surface":"nauvis","tags":["power","silo"]}
+
+Remote interface (`telemetry_mod`)
+- `notify(payload)` -> emits a `type:"notify"` telemetry line and raises a runtime event for subscribers.
+- `get_notify_event_id()` -> returns custom event id raised for `notify` payloads.
+- Existing evolution API remains unchanged (`get_evolution_event_id`, `get_enemy_evolution`, etc.).
+
+Example:
+```lua
+remote.call("telemetry_mod", "notify", {
+  source = "my_mod",
+  severity = "warning", -- info|warning|critical (warn/error aliases are normalized)
+  message = "Assembler line is starved",
+  surface = "nauvis",
+  tags = { "production", "inputs" }
+})
+```
 
 **Localization**
 - The mod includes localization files under `locale/` (`en` and `pl`). Update translations in the appropriate locale files.
@@ -42,9 +60,14 @@ Lightweight, runtime-only Factorio mod that writes one JSON object per line to `
 - Do not change the semantics of fields without coordinating matching updates in both the mod and any relay components.
 
 **Files to review**
-- `control.lua` — main mod logic.
-- `settings.lua` — potential runtime settings (if present).
-- `locale/` — localization and translations.
-- `pack-mod.ps1` — helper script for packaging the mod (in the `mod/` folder).
+- `control.lua` - main mod logic.
+- `runtime/common.lua` - shared string/locale/surface helpers.
+- `runtime/evolution_thresholds.lua` - evolution threshold definitions and selection logic.
+- `runtime/write_backend.lua` - backend detection for `helpers.write_file` / `game.write_file`.
+- `runtime/jsonl_buffer.lua` - bounded JSONL buffer writer (size/age pruning + flush).
+- `runtime/notify.lua` - normalization and emission of `type:"notify"` telemetry.
+- `settings.lua` - potential runtime settings (if present).
+- `locale/` - localization and translations.
+- `pack-mod.ps1` - helper script for packaging the mod (in the `mod/` folder).
 
 If you want, I can create a sample `telemetry.jsonl` with test events or update the relay documentation with an example `bot` configuration.
