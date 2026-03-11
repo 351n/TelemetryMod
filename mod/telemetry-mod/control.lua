@@ -60,6 +60,10 @@ local evolution_runtime = require("runtime.evolution_thresholds")
 local notify_runtime = require("runtime.notify")
 local write_backend_runtime = require("runtime.write_backend")
 local jsonl_buffer_runtime = require("runtime.jsonl_buffer")
+local translation_runtime = require("runtime.translation_runtime")
+local death_telemetry_runtime = require("runtime.death_telemetry")
+local research_telemetry_runtime = require("runtime.research_telemetry")
+local lifecycle_runtime = require("runtime.lifecycle")
 
 local escape_json_string = common.escape_json_string
 local is_localised = common.is_localised
@@ -67,6 +71,10 @@ local localised_fallback = common.localised_fallback
 local fmt_pct01 = common.fmt_pct01
 local notify_api = nil
 local telemetry_writer = nil
+local translation_api = nil
+local death_telemetry_api = nil
+local research_telemetry_api = nil
+local lifecycle_api = nil
 
 local function with_prefix(message)
   return common.with_prefix(message, "telemetry-mod.prefix")
@@ -511,487 +519,103 @@ local function write_desync_telemetry_line(tick, player_name, reason_id)
   write_json_line(line)
 end
 
--- Telemetry translation preferences (for human-readable names)
--- Default to English, fallback Polish if no English-speaking players are connected.
-local PREFERRED_TLM_LOCALES = { "en", "pl" }
-local DEFAULT_DEATH_TRANSLATION_TIMEOUT_TICKS = 10 * 60 -- 10 seconds
-local DEFAULT_EVOLUTION_TRANSLATION_TIMEOUT_TICKS = 10 * 60 -- 10 seconds
+-- Translation + death/research telemetry modules ------------------------------
 
-local function tlm_locale_rank(loc)
-  if not loc then return #PREFERRED_TLM_LOCALES + 1 end
-  for i = 1, #PREFERRED_TLM_LOCALES do
-    if loc == PREFERRED_TLM_LOCALES[i] then return i end
-  end
-  return #PREFERRED_TLM_LOCALES + 1
+local function ensure_translation_api()
+  if translation_api then return translation_api end
+  translation_api = translation_runtime.new({
+    is_localised = is_localised,
+    localised_fallback = localised_fallback
+  })
+  return translation_api
 end
 
--- Pick a stable translator player:
--- 1) preferred locale order, 2) player name (A->Z), 3) smallest player index
--- If `force_obj` is provided, prefer players from that force, but fall back to any connected player.
-local function pick_translator_player_tlm(force_obj)
-  if not game or not game.connected_players then return nil end
-
-  local function consider(best, p)
-    if not (p and p.valid) then return best end
-    local r = tlm_locale_rank(p.locale)
-    local n = string.lower(tostring(p.name or ""))
-    local idx = tonumber(p.index) or 0
-    if (not best)
-      or (r < best.r)
-      or (r == best.r and n < best.n)
-      or (r == best.r and n == best.n and idx < best.idx)
-    then
-      return { p = p, r = r, n = n, idx = idx }
-    end
-    return best
+local function get_player_force_by_index(player_index)
+  if not (game and player_index) then return nil end
+  local p = game.get_player(player_index)
+  if p and p.valid and p.force then
+    return p.force
   end
+  return nil
+end
 
-  local best = nil
-  -- First pass: same force (if specified)
-  if force_obj then
-    for _, p in pairs(game.connected_players) do
-      if p and p.force == force_obj then
-        best = consider(best, p)
-      end
-    end
-  end
-  -- Fallback: any force
-  if not best then
-    for _, p in pairs(game.connected_players) do
-      best = consider(best, p)
-    end
-  end
+local function get_force_by_name(force_name)
+  if not (game and game.forces and force_name and force_name ~= "") then return nil end
+  return game.forces[force_name]
+end
 
-  return best and best.p or nil
+local function ensure_death_telemetry_api()
+  if death_telemetry_api then return death_telemetry_api end
+  death_telemetry_api = death_telemetry_runtime.new({
+    escape_json_string = escape_json_string,
+    write_json_line = write_json_line,
+    safe_player_name_from_index = safe_player_name_from_index,
+    get_player_force_by_index = get_player_force_by_index,
+    translation_api = ensure_translation_api()
+  })
+  return death_telemetry_api
+end
+
+local function ensure_research_telemetry_api()
+  if research_telemetry_api then return research_telemetry_api end
+  research_telemetry_api = research_telemetry_runtime.new({
+    escape_json_string = escape_json_string,
+    write_json_line = write_json_line,
+    safe_player_name_from_index = safe_player_name_from_index,
+    get_force_by_name = get_force_by_name,
+    translation_api = ensure_translation_api()
+  })
+  return research_telemetry_api
+end
+
+local function ensure_player_telemetry_apis()
+  local tr = ensure_translation_api()
+  local death_api = ensure_death_telemetry_api()
+  local research_api = ensure_research_telemetry_api()
+  tr.set_handlers({
+    write_death_line = death_api.write_death_telemetry_line,
+    write_research_line = research_api.write_research_telemetry_line,
+    emit_threshold = function(tick, force_name, current_factor, th, direction, msg_string, msg_localised, surface_name)
+      emit_threshold(tick, force_name, current_factor, th, direction, msg_string, msg_localised, surface_name)
+    end
+  })
+  return tr, death_api, research_api
 end
 
 resolve_localised_or_request = function(localised_value, force_obj)
-  if not is_localised(localised_value) then
-    return tostring(localised_value), nil
-  end
-  local translator = pick_translator_player_tlm(force_obj)
-  if translator and translator.valid and translator.request_translation then
-    local id = nil
-    local ok = pcall(function()
-      id = translator.request_translation(localised_value)
-    end)
-    if ok and id then
-      return nil, { id = id, locale = translator.locale, player_index = translator.index }
-    end
-  end
-  return localised_fallback(localised_value), nil
+  local tr = ensure_player_telemetry_apis()
+  return tr.resolve_localised_or_request(localised_value, force_obj)
 end
 
-local function get_entity_translation_cached(locale, entity_name)
-  if not global or not locale or not entity_name then return nil end
-  local cache = global.entity_translation_cache
-  if cache and cache[locale] and cache[locale][entity_name] then
-    return cache[locale][entity_name]
-  end
-  return nil
-end
-
-local function put_entity_translation_cached(locale, entity_name, translated)
-  if not global or not locale or not entity_name or not translated then return end
-  global.entity_translation_cache = global.entity_translation_cache or {}
-  global.entity_translation_cache[locale] = global.entity_translation_cache[locale] or {}
-  global.entity_translation_cache[locale][entity_name] = translated
-end
-
--- Describe the cause of a player death in a robust way that tolerates mods.
-local function describe_death_cause(event)
-  local cause_name = nil
-  local cause_localised = nil -- LocalisedString (needs client translation)
-  local cause_type = nil
-  local cause_force = nil
-  local pos_x = nil
-  local pos_y = nil
-  local damage_type = nil
-
-  -- damage type (LuaDamagePrototype)
-  pcall(function()
-    if event and event.damage_type and event.damage_type.name then
-      damage_type = event.damage_type.name
-    end
-  end)
-
-  -- event position (if provided by runtime)
-  pcall(function()
-    if event and event.position then
-      pos_x = event.position.x
-      pos_y = event.position.y
-    end
-  end)
-
-  local cause = event and event.cause
-  if cause then
-    -- Most commonly a LuaEntity (userdata); access fields directly with pcall guards.
-    pcall(function()
-      if cause.valid == false then return end
-      if cause.name then cause_name = cause.name end
-      if cause.localised_name then cause_localised = cause.localised_name end
-      if cause.type then cause_type = cause.type end
-      if cause.force and cause.force.name then cause_force = cause.force.name end
-      if (not pos_x) and cause.position then
-        pos_x = cause.position.x
-        pos_y = cause.position.y
-      end
-      -- If the killer is a character, include the owning player's name when possible.
-      pcall(function()
-        if cause_type == "character" and cause.player and cause.player.name then
-          cause_name = "character:" .. tostring(cause.player.name)
-        end
-      end)
-    end)
-
-    -- Last resort fallback (avoid embedding "[LuaEntity: ...]" when we can)
-    if not cause_name then
-      cause_name = tostring(cause)
-    end
-  end
-
-  return {
-    cause_name = cause_name,
-    cause_localised = cause_localised,
-    cause_type = cause_type,
-    cause_force = cause_force,
-    damage_type = damage_type,
-    pos_x = pos_x,
-    pos_y = pos_y
-  }
-end
-
-local function write_death_telemetry_line(tick, player_name, info, cause_localised_str)
-  local pos_part = "null,null"
-  if info and info.pos_x ~= nil and info.pos_y ~= nil then
-    pos_part = tostring(info.pos_x) .. "," .. tostring(info.pos_y)
-  end
-
-  local cause_name = (info and info.cause_name) or "unknown"
-  local cause_loc = cause_localised_str or cause_name
-
-  local line = string.format(
-    '{"tick":%d,"type":"death","player":"%s","cause":"%s","cause_localised":"%s","cause_type":"%s","cause_force":"%s","damage_type":"%s","pos":[%s]}',
-    tick or ((game and game.tick) or 0),
-    escape_json_string(player_name or "unknown"),
-    escape_json_string(cause_name),
-    escape_json_string(cause_loc),
-    escape_json_string((info and info.cause_type) or ""),
-    escape_json_string((info and info.cause_force) or ""),
-    escape_json_string((info and info.damage_type) or ""),
-    pos_part
-  )
-  write_json_line(line)
-end
-
--- Prevent losing death events if translation never arrives (disconnect, etc.)
 local function flush_stale_death_translations()
-  if not global or not global.pending_death_translations or not game or not game.tick then return end
-  local now = game.tick
-  local timeout = DEFAULT_DEATH_TRANSLATION_TIMEOUT_TICKS
-  for id, meta in pairs(global.pending_death_translations) do
-    if meta and meta.request_tick and (now - meta.request_tick) > timeout then
-      -- Fallback: localised = internal name
-      write_death_telemetry_line(meta.tick or now, meta.player, meta.info, meta.info and meta.info.cause_name)
-      global.pending_death_translations[id] = nil
-    end
-  end
+  local tr = ensure_player_telemetry_apis()
+  tr.flush_stale_death_translations()
 end
 
--- Prevent losing evolution threshold events if translation never arrives
-local function flush_stale_evolution_translations()
-  if not global or not global.pending_evolution_translations or not game or not game.tick then return end
-  local now = game.tick
-  local timeout = DEFAULT_EVOLUTION_TRANSLATION_TIMEOUT_TICKS
-  for id, meta in pairs(global.pending_evolution_translations) do
-    if meta and meta.request_tick and (now - meta.request_tick) > timeout then
-      local msg_string = localised_fallback(meta.message_localised or "")
-      emit_threshold(meta.tick or now, meta.force_name, meta.evolution_factor or 0, meta.threshold, meta.direction, msg_string, meta.message_localised, meta.surface)
-      global.pending_evolution_translations[id] = nil
-    end
-  end
-end
-
--- Log player death; enrich with cause name, position, and translated localised name when available.
-local function on_player_died(event)
-  local tick = (game and game.tick) or 0
-  local player_name = safe_player_name_from_index(event and event.player_index)
-  local info = describe_death_cause(event)
-
-  -- If we still don't have a position, try the player's current position.
-  if (info.pos_x == nil or info.pos_y == nil) and game and event and event.player_index then
-    local p = game.get_player(event.player_index)
-    pcall(function()
-      if p and p.valid and p.position then
-        info.pos_x = info.pos_x or p.position.x
-        info.pos_y = info.pos_y or p.position.y
-      end
-    end)
-  end
-
-  -- Determine force (for a better default translator choice)
-  local force_obj = nil
-  if game and event and event.player_index then
-    local p = game.get_player(event.player_index)
-    if p and p.valid and p.force then force_obj = p.force end
-  end
-
-  local cause_name = info.cause_name or "unknown"
-
-  -- Try to translate cause.localised_name via a connected player
-  local translator = pick_translator_player_tlm(force_obj)
-  if translator and translator.valid and translator.locale then
-    local cached = get_entity_translation_cached(translator.locale, cause_name)
-    if cached then
-      write_death_telemetry_line(tick, player_name, info, cached)
-      return
-    end
-
-    if info.cause_localised and translator.request_translation then
-      global.pending_death_translations = global.pending_death_translations or {}
-      local id = nil
-      local ok = pcall(function()
-        id = translator.request_translation(info.cause_localised)
-      end)
-      if ok and id then
-        global.pending_death_translations[id] = {
-          tick = tick,
-          request_tick = tick,
-          player = player_name,
-          info = info,
-          locale = translator.locale,
-          player_index = translator.index
-        }
-        return -- will be written in on_string_translated (or via timeout flush)
-      end
-    end
-  end
-
-  -- Fallback: localised = internal name
-  write_death_telemetry_line(tick, player_name, info, cause_name)
-end
--- Log join event
- 
--- Describe research event robustly (handles modded techs/forces)
-local function describe_research_event(event)
-  local tech_name = nil
-  local tech_localised = nil -- LocalisedString (needs client translation)
-  local force_name = nil
-  local player_name = nil
-  pcall(function()
-    if event then
-      if event.research then
-        local r = event.research
-        if r.name then tech_name = r.name end
-        if r.localised_name then tech_localised = r.localised_name end
-        if r.force and r.force.name then force_name = r.force.name end
-      end
-      -- some runtimes may provide shorthand fields
-      if not tech_name and event.research_name then tech_name = event.research_name end
-      if not force_name and event.force and event.force.name then force_name = event.force.name end
-      if event.player_index then player_name = safe_player_name_from_index(event.player_index) end
-    end
-  end)
-  return { technology = tech_name, technology_localised = tech_localised, force = force_name, player = player_name }
-end
-
--- Translation + caching for technology localised names (headless-safe)
--- We translate via a connected player's locale (request_translation -> on_string_translated).
-local PREFERRED_TECH_LOCALES = { "en", "pl" } -- default: English, fallback Polish
-local DEFAULT_TECH_TRANSLATION_TIMEOUT_TICKS = 10 * 60 -- 10 seconds
-
-local function locale_rank(loc)
-  if not loc then return #PREFERRED_TECH_LOCALES + 1 end
-  for i = 1, #PREFERRED_TECH_LOCALES do
-    if loc == PREFERRED_TECH_LOCALES[i] then return i end
-  end
-  return #PREFERRED_TECH_LOCALES + 1
-end
-
--- Pick a stable "translator" player:
--- 1) preferred locale order, 2) player name (A->Z), 3) smallest player index
-local function pick_translator_player(force)
-  if not game or not game.connected_players then return nil end
-  local best = nil
-  for _, p in pairs(game.connected_players) do
-    if p and p.valid and ((not force) or p.force == force) then
-      local r = locale_rank(p.locale)
-      local n = string.lower(tostring(p.name or ""))
-      local idx = tonumber(p.index) or 0
-      if (not best)
-        or (r < best.r)
-        or (r == best.r and n < best.n)
-        or (r == best.r and n == best.n and idx < best.idx)
-      then
-        best = { p = p, r = r, n = n, idx = idx }
-      end
-    end
-  end
-  return best and best.p or nil
-end
-
-local function get_tech_translation_cached(locale, tech_name)
-  if not global or not locale or not tech_name then return nil end
-  local cache = global.tech_translation_cache
-  if cache and cache[locale] and cache[locale][tech_name] then
-    return cache[locale][tech_name]
-  end
-  return nil
-end
-
-local function put_tech_translation_cached(locale, tech_name, translated)
-  if not global or not locale or not tech_name or not translated then return end
-  global.tech_translation_cache = global.tech_translation_cache or {}
-  global.tech_translation_cache[locale] = global.tech_translation_cache[locale] or {}
-  global.tech_translation_cache[locale][tech_name] = translated
-end
-
-local function write_research_telemetry_line(tick, tech_name, tech_localised, force_name, player_name)
-  local safe_tick = tick or ((game and game.tick) or 0)
-  local localised = tech_localised or tech_name or "unknown"
-  local line = string.format(
-    '{"tick":%d,"type":"research","technology":"%s","technology_localised":"%s","force":"%s","player":"%s"}',
-    safe_tick,
-    escape_json_string(tech_name or "unknown"),
-    escape_json_string(localised),
-    escape_json_string(force_name or ""),
-    escape_json_string(player_name or "")
-  )
-  write_json_line(line)
-end
-
--- Prevent losing research events if translation never arrives (disconnect, etc.)
 local function flush_stale_research_translations()
-  if not global or not global.pending_research_translations or not game or not game.tick then return end
-  local now = game.tick
-  local timeout = DEFAULT_TECH_TRANSLATION_TIMEOUT_TICKS
-  for id, meta in pairs(global.pending_research_translations) do
-    if meta and meta.request_tick and (now - meta.request_tick) > timeout then
-      write_research_telemetry_line(meta.tick or now, meta.technology, meta.technology, meta.force, meta.player)
-      global.pending_research_translations[id] = nil
-    end
-  end
+  local tr = ensure_player_telemetry_apis()
+  tr.flush_stale_research_translations()
 end
 
--- Log technology researched/unlocked
+local function flush_stale_evolution_translations()
+  local tr = ensure_player_telemetry_apis()
+  tr.flush_stale_evolution_translations()
+end
+
+local function on_player_died(event)
+  local _, death_api = ensure_player_telemetry_apis()
+  death_api.on_player_died(event)
+end
+
 local function on_research_finished(event)
-  local info = describe_research_event(event)
-  local tick = (game and game.tick) or 0
-
-  local tech_name = info.technology or "unknown"
-  local force_name = info.force or ""
-  local player_name = info.player or ""
-
-  -- Try to translate using a connected player (preferred locale order, then alphabetical).
-  local force_obj = nil
-  pcall(function()
-    if event and event.research and event.research.force then force_obj = event.research.force end
-    if (not force_obj) and game and game.forces and force_name ~= "" then force_obj = game.forces[force_name] end
-  end)
-
-  local translator = pick_translator_player(force_obj)
-  if translator and translator.valid and translator.locale then
-    local cached = get_tech_translation_cached(translator.locale, tech_name)
-    if cached then
-      write_research_telemetry_line(tick, tech_name, cached, force_name, player_name)
-      return
-    end
-
-    if info.technology_localised and translator.request_translation then
-      global.pending_research_translations = global.pending_research_translations or {}
-      local id = nil
-      local ok = pcall(function()
-        id = translator.request_translation(info.technology_localised)
-      end)
-      if ok and id then
-        global.pending_research_translations[id] = {
-          tick = tick,
-          request_tick = tick,
-          technology = tech_name,
-          force = force_name,
-          player = player_name,
-          locale = translator.locale,
-          player_index = translator.index
-        }
-        return -- telemetry line will be written when on_string_translated arrives (or via timeout flush)
-      end
-    end
-  end
-
-  -- Fallback: log with localised = internal name
-  write_research_telemetry_line(tick, tech_name, tech_name, force_name, player_name)
+  local _, _, research_api = ensure_player_telemetry_apis()
+  research_api.on_research_finished(event)
 end
 
--- Receive translation results and emit research telemetry with technology_localised
 local function on_string_translated(event)
-  if not event or not global then return end
-
-  -- Research translation results
-  if global.pending_research_translations then
-    local meta = global.pending_research_translations[event.id]
-    if meta then
-      global.pending_research_translations[event.id] = nil
-
-      -- best-effort sanity check: ensure this is the same player we requested from
-      if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
-        return
-      end
-
-      local translated = meta.technology
-      if event.translated and event.result then
-        translated = event.result
-        put_tech_translation_cached(meta.locale, meta.technology, translated)
-      end
-
-      write_research_telemetry_line(meta.tick, meta.technology, translated, meta.force, meta.player)
-      return
-    end
-  end
-
-  -- Death translation results (cause_localised)
-  if global.pending_death_translations then
-    local meta = global.pending_death_translations[event.id]
-    if meta then
-      global.pending_death_translations[event.id] = nil
-
-      if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
-        return
-      end
-
-      local info = meta.info or {}
-      local cause_name = info.cause_name or "unknown"
-      local translated = cause_name
-      if event.translated and event.result then
-        translated = event.result
-        put_entity_translation_cached(meta.locale, cause_name, translated)
-      end
-
-      write_death_telemetry_line(meta.tick, meta.player, info, translated)
-    end
-  end
-
-  -- Evolution threshold translation results (message)
-  if global.pending_evolution_translations then
-    local meta = global.pending_evolution_translations[event.id]
-    if meta then
-      global.pending_evolution_translations[event.id] = nil
-
-      if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
-        return
-      end
-
-      local msg_string = localised_fallback(meta.message_localised or "")
-      if event.translated and event.result then
-        msg_string = event.result
-      end
-
-      emit_threshold(meta.tick or ((game and game.tick) or 0), meta.force_name, meta.evolution_factor or 0, meta.threshold, meta.direction, msg_string, meta.message_localised, meta.surface)
-    end
-  end
+  local tr = ensure_player_telemetry_apis()
+  tr.on_string_translated(event)
 end
-
-
-
 -- Log join event
 local function on_player_joined(event)
   local name = "unknown"
@@ -1067,93 +691,41 @@ local function afk_poll(event)
   end
 end
 
--- Setup event registrations
-script.on_event(defines.events.on_player_joined_game, on_player_joined)
-script.on_event(defines.events.on_player_left_game, on_player_left)
-pcall(function() script.on_event(defines.events.on_pre_player_left_game, on_pre_player_left) end)
-script.on_nth_tick(AFK_INTERVAL_TICKS, afk_poll)
-script.on_nth_tick(EVOLUTION_INTERVAL_TICKS, evolution_poll)
--- Register player death event (guarded handler)
-pcall(function() script.on_event(defines.events.on_player_died, on_player_died) end)
--- Register research finished event (guarded)
-pcall(function() script.on_event(defines.events.on_research_finished, on_research_finished) end)
--- Register string translation event (guarded)
-pcall(function() script.on_event(defines.events.on_string_translated, on_string_translated) end)
-
--- Clear log file on init. Comment out the next line if you prefer to keep previous logs.
-script.on_init(function()
-  -- Initialize in-memory buffer persisted in `global` and try to clear the on-disk log.
-  global.telemetry_buffer = { entries = {}, total_bytes = 0 }
-  -- Translation state for research telemetry
+local function ensure_runtime_state()
+  if not global then return end
+  global.telemetry_buffer = global.telemetry_buffer or { entries = {}, total_bytes = 0 }
   global.tech_translation_cache = global.tech_translation_cache or {}
+  global.entity_translation_cache = global.entity_translation_cache or {}
   global.pending_research_translations = global.pending_research_translations or {}
-  -- Translation state for evolution telemetry
+  global.pending_death_translations = global.pending_death_translations or {}
   global.pending_evolution_translations = global.pending_evolution_translations or {}
-  -- AFK info state
   global.telemetry_afk_state = global.telemetry_afk_state or {}
-  -- Foundation for custom telemetry producers (remote notify/entity signals in future)
   global.telemetry_notify_state = global.telemetry_notify_state or {}
-  -- Evolution telemetry state
   global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
-  pcall(function()
-    local f = get_observed_force()
-    if f and f.valid then
-      -- Baseline to current factor to avoid "catch-up spam" after enabling the mod.
-      ensure_evolution_state()
-      for _, surface_name in ipairs(EVOLUTION_SURFACE_NAMES or { DEFAULT_EVOLUTION_SURFACE_NAME }) do
-        local surface = game.surfaces[surface_name]
-        if surface then
-          local st = ensure_evolution_surface_state(surface_name)
-          local current = tonumber(get_force_evolution_factor(f, surface_name)) or 0
-          st.last_checked_factor = current
-          st.last_logged_factor = current
-          st.unlogged_delta = 0
-          st.prev_poll_factor = current
-          write_evolution_telemetry_line((game and game.tick) or 0, "init", f.name, current, {
-            include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
-            surface = surface_name
-          })
-        end
-      end
-    end
-  end)
+end
 
-  -- Try to clear the log using available backend (overwrite=false to clear)
-  local ok, err = write_file_safe(LOG_FILE, "", false)
-  if ok then
-    safe_game_print({ "telemetry-mod.init-cleared" })
-    safe_log({ "telemetry-mod.init-cleared" })
-  else
-    -- If there's no backend, avoid noisy errors; still notify presence in chat when possible
-    if err and err ~= "no write backend" then
-      safe_log({ "telemetry-mod.init-write-failed", tostring(err) })
+local function baseline_observed_evolution(trigger_name)
+  local f = get_observed_force()
+  if not (f and f.valid) then return end
+  ensure_evolution_state()
+  for _, surface_name in ipairs(EVOLUTION_SURFACE_NAMES or { DEFAULT_EVOLUTION_SURFACE_NAME }) do
+    local surface = game.surfaces[surface_name]
+    if surface then
+      local st = ensure_evolution_surface_state(surface_name)
+      local current = tonumber(get_force_evolution_factor(f, surface_name)) or 0
+      st.last_checked_factor = current
+      st.last_logged_factor = current
+      st.unlogged_delta = 0
+      st.prev_poll_factor = current
+      write_evolution_telemetry_line((game and game.tick) or 0, trigger_name or "init", f.name, current, {
+        include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
+        surface = surface_name
+      })
     end
-    safe_game_print({ "telemetry-mod.init-no-backend" })
   end
-end)
+end
 
 local apply_settings -- forward declaration
-
--- Ensure nth_tick is registered after a configuration change / load
-script.on_configuration_changed(function(data)
-  -- ensure translation state exists
-  if global then
-    global.tech_translation_cache = global.tech_translation_cache or {}
-    global.pending_research_translations = global.pending_research_translations or {}
-    global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
-    global.pending_evolution_translations = global.pending_evolution_translations or {}
-    global.telemetry_afk_state = global.telemetry_afk_state or {}
-    global.telemetry_notify_state = global.telemetry_notify_state or {}
-  end
-
-  -- Re-apply settings and re-register nth_tick handlers safely
-  pcall(function()
-    if apply_settings then apply_settings() end
-  end)
-
-  safe_game_print({ "telemetry-mod.config-changed" })
-  safe_log({ "telemetry-mod.config-changed" })
-end)
 
 -- Read runtime-global settings (if available) and apply them at runtime.
 local function read_setting(name, def)
@@ -1214,38 +786,42 @@ apply_settings = function()
   -- If the observed force changed, baseline the evolution state (prevents retro-trigger spam).
   if global and (old_force_name ~= EVOLUTION_FORCE_NAME or old_surface_names_str ~= EVOLUTION_SURFACE_NAMES_STR) then
     pcall(function()
-      local f = get_observed_force()
-      if f and f.valid then
-        ensure_evolution_state()
-        for _, surface_name in ipairs(EVOLUTION_SURFACE_NAMES or { DEFAULT_EVOLUTION_SURFACE_NAME }) do
-          local surface = game.surfaces[surface_name]
-          if surface then
-            local st = ensure_evolution_surface_state(surface_name)
-            local current = tonumber(get_force_evolution_factor(f, surface_name)) or 0
-            st.last_checked_factor = current
-            st.last_logged_factor = current
-            st.unlogged_delta = 0
-            st.prev_poll_factor = current
-            write_evolution_telemetry_line((game and game.tick) or 0, "config", f.name, current, {
-              include_dominance = EVOLUTION_INCLUDE_DOMINANCE == true,
-              surface = surface_name
-            })
-          end
-        end
-      end
+      baseline_observed_evolution("config")
     end)
   end
+end
+
+local function is_telemetry_setting(name)
+  return string.find(name or "", "telemetry-") ~= nil
 end
 
 -- Apply settings on load
 apply_settings()
 
--- React to runtime setting changes
-script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
-  if not event or not event.setting then return end
-  if string.find(event.setting, "telemetry-") then
-    apply_settings()
-    safe_game_print({ "telemetry-mod.settings-updated" })
-    safe_log({ "telemetry-mod.settings-updated" })
-  end
-end)
+local function ensure_lifecycle_api()
+  if lifecycle_api then return lifecycle_api end
+  lifecycle_api = lifecycle_runtime.new({
+    handlers = {
+      on_player_joined = on_player_joined,
+      on_player_left = on_player_left,
+      on_pre_player_left = on_pre_player_left,
+      afk_poll = afk_poll,
+      evolution_poll = evolution_poll,
+      on_player_died = on_player_died,
+      on_research_finished = on_research_finished,
+      on_string_translated = on_string_translated
+    },
+    get_afk_interval_ticks = function() return AFK_INTERVAL_TICKS end,
+    get_evolution_interval_ticks = function() return EVOLUTION_INTERVAL_TICKS end,
+    ensure_runtime_state = ensure_runtime_state,
+    baseline_init_evolution = function() baseline_observed_evolution("init") end,
+    clear_log_file = function() return write_file_safe(LOG_FILE, "", false) end,
+    apply_settings = function() apply_settings() end,
+    is_telemetry_setting = is_telemetry_setting,
+    safe_game_print = safe_game_print,
+    safe_log = safe_log
+  })
+  return lifecycle_api
+end
+
+ensure_lifecycle_api().register()

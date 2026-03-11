@@ -66,6 +66,10 @@ remote.call("telemetry_mod", "notify", {
 - `runtime/write_backend.lua` - backend detection for `helpers.write_file` / `game.write_file`.
 - `runtime/jsonl_buffer.lua` - bounded JSONL buffer writer (size/age pruning + flush).
 - `runtime/notify.lua` - normalization and emission of `type:"notify"` telemetry.
+- `runtime/translation_runtime.lua` - translation request/caching flow + stale pending resolution.
+- `runtime/death_telemetry.lua` - death event enrichment and output formatting.
+- `runtime/research_telemetry.lua` - research event extraction and output formatting.
+- `runtime/lifecycle.lua` - event registration + init/config/runtime-setting lifecycle wiring.
 - `settings.lua` - potential runtime settings (if present).
 - `locale/` - localization and translations.
 - `pack-mod.ps1` - helper script for packaging the mod (in the `mod/` folder).
