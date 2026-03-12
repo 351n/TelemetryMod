@@ -230,6 +230,19 @@ const EVOLUTION_NEW_TYPE_KEYS = new Set([
   'tier_10_75'
 ]);
 
+const EVENT_EMOJI = {
+  join: '🟢',
+  leave: '⚪',
+  desync: '🔴',
+  afk: '💤',
+  afkBack: '🔔',
+  death: '💀',
+  research: '🔬',
+  evolution: '🧬',
+  notify: '📣',
+  unknown: '❓'
+};
+
 function formatEvolutionPercent(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
@@ -259,6 +272,19 @@ function normalizeNotifySeverity(value) {
   if (raw === 'error' || raw === 'fatal') return 'critical';
   if (raw === 'warning' || raw === 'critical') return raw;
   return 'info';
+}
+
+function parseAfkSeconds(obj) {
+  if (obj && obj.afk_seconds !== undefined && obj.afk_seconds !== null && obj.afk_seconds !== '') {
+    const sec = Number(obj.afk_seconds);
+    if (Number.isFinite(sec) && sec >= 0) return Math.floor(sec);
+  }
+
+  const ticks = Number(obj && obj.afk_ticks);
+  if (Number.isFinite(ticks) && ticks >= 0) {
+    return Math.floor(ticks / 60);
+  }
+  return 0;
 }
 
 function shouldPersistEventId(obj) {
@@ -485,8 +511,8 @@ function handleEvent(obj) {
     };
 
     const handlers = {
-      join: () => notify(`[JOIN] ${player} wszedl na serwer`, 'critical'),
-      leave: () => notify(`[LEAVE] ${player} wyszedl z serwera`, 'critical'),
+      join: () => notify(`${EVENT_EMOJI.join} ${player} wszedl na serwer`, 'critical'),
+      leave: () => notify(`${EVENT_EMOJI.leave} ${player} wyszedl z serwera`, 'critical'),
       desync: () => {
         const reason = (obj.reason && String(obj.reason).trim()) ? String(obj.reason).trim() : '';
         const reasonIdRaw = Number(obj.reason_id);
@@ -495,19 +521,19 @@ function handleEvent(obj) {
         if (reason) reasonBits.push(reason);
         if (reasonId !== null) reasonBits.push(`id:${reasonId}`);
         const reasonSuffix = reasonBits.length ? ` (${reasonBits.join(', ')})` : '';
-        notify(`[DESYNC] ${player} rozlaczyl sie przez desync${reasonSuffix}`, 'critical');
+        notify(`${EVENT_EMOJI.desync} ${player} rozlaczyl sie przez desync${reasonSuffix}`, 'critical');
       },
       afk: () => {
-        const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
+        const afkSeconds = parseAfkSeconds(obj);
         const p = normalizePlayerStateEntry(state.players[player], Date.now());
         p.lastSeenTs = Date.now();
         state.players[player] = p;
         if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
           p.isAfk = true;
-          notify(`[AFK] ${player} AFK`, 'warning', { type: 'afk', player });
+          notify(`${EVENT_EMOJI.afk} ${player} AFK`, 'warning', { type: 'afk', player });
         } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
           p.isAfk = false;
-          notify(`[AFK] ${player} wrocil z AFK`, 'warning', { type: 'afk', player });
+          notify(`${EVENT_EMOJI.afkBack} ${player} wrocil z AFK`, 'warning', { type: 'afk', player });
         }
       },
       death: () => {
@@ -523,7 +549,7 @@ function handleEvent(obj) {
         if (causeForce) parts.push(`(${causeForce})`);
         if (dmg) parts.push(`typ:${dmg}`);
         const detail = parts.length ? ` - ${parts.join(' ')}` : '';
-        notify(`[DEATH] ${player} zginal${detail}${pos}${surfaceSuffix}`, 'info', { type: 'death', player, detail, surface });
+        notify(`${EVENT_EMOJI.death} ${player} zginal${detail}${pos}${surfaceSuffix}`, 'info', { type: 'death', player, detail, surface });
       },
       research: () => {
         const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
@@ -531,8 +557,8 @@ function handleEvent(obj) {
         const techName = tech || 'nieznana technologia';
         const force = obj.force || '';
         const content = (force && force != 'player')
-          ? `[RESEARCH] ${force} odkryl ${techName}`
-          : `[RESEARCH] Odkryto ${techName}`;
+          ? `${EVENT_EMOJI.research} ${force} odkryl ${techName}`
+          : `${EVENT_EMOJI.research} Odkryto ${techName}`;
         notify(content, 'info', { type: 'research', tech: techName });
       },
       evolution: () => {
@@ -542,7 +568,7 @@ function handleEvent(obj) {
         const suffix = pct ? ` (EF=${pct}%)` : '';
         const surface = obj.surface || '';
         const surfaceSuffix = surface ? ` on ${surface}` : '';
-        notify(`[EVOLUTION] ${msg}${suffix}${surfaceSuffix}`, 'critical', { type: 'evolution', surface: surface });
+        notify(`${EVENT_EMOJI.evolution} ${msg}${suffix}${surfaceSuffix}`, 'critical', { type: 'evolution', surface: surface });
       },
       notify: () => {
         const message = (obj.message && String(obj.message).trim())
@@ -553,14 +579,14 @@ function handleEvent(obj) {
         const severity = normalizeNotifySeverity(obj.severity || obj.level);
         const surface = (obj.surface && String(obj.surface).trim()) ? String(obj.surface).trim() : '';
         const surfaceSuffix = surface ? ` [${surface}]` : '';
-        notify(`[NOTIFY] [${source}] ${message}${surfaceSuffix}`, severity, { type: 'notify', source, severity });
+        notify(`${EVENT_EMOJI.notify} [${source}] ${message}${surfaceSuffix}`, severity, { type: 'notify', source, severity });
       }
     };
 
     if (handlers[t]) {
       handlers[t]();
     } else {
-      notify(`[UNKNOWN] ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
+      notify(`${EVENT_EMOJI.unknown} ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
     }
   } catch (e) {
     console.error('handleEvent error:', e);
