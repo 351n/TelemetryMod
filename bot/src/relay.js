@@ -23,6 +23,11 @@ const PING_ON_CRITICAL_ONLY = String(process.env.PING_ON_CRITICAL_ONLY || 'true'
 
 const AFK_ON_SECONDS = Number(process.env.AFK_ON_SECONDS || 300);
 const AFK_OFF_SECONDS = Number(process.env.AFK_OFF_SECONDS || 60);
+const STATE_MAX_SENT_IDS = Math.max(100, Number(process.env.STATE_MAX_SENT_IDS || 800));
+const STATE_MAX_SUPPRESSED_EVENTS = Math.max(50, Number(process.env.STATE_MAX_SUPPRESSED_EVENTS || 500));
+const STATE_MAX_CARRY_BYTES = Math.max(1024, Number(process.env.STATE_MAX_CARRY_BYTES || 32768));
+const STATE_PLAYER_STALE_HOURS = Math.max(1, Number(process.env.STATE_PLAYER_STALE_HOURS || (7 * 24)));
+const STATE_MAX_PLAYERS = Math.max(10, Number(process.env.STATE_MAX_PLAYERS || 200));
 
 // Evolution surface whitelist (comma/space/semicolon-separated). When null, behave as today.
 const EVOLUTION_NOTIFY_SURFACES_RAW = process.env.EVOLUTION_NOTIFY_SURFACES || 'navius,gleba';
@@ -63,6 +68,75 @@ state.wasQuiet = state.wasQuiet || false;
 state.sentEventIds = state.sentEventIds || [];
 state.lastTick = state.lastTick || 0;
 
+function normalizePlayerStateEntry(entry, nowTs) {
+  const isAfk = !!(entry && entry.isAfk);
+  const rawLastSeen = Number(entry && entry.lastSeenTs);
+  const lastSeenTs = Number.isFinite(rawLastSeen) && rawLastSeen > 0 ? rawLastSeen : nowTs;
+  return { isAfk, lastSeenTs };
+}
+
+function trimState() {
+  const now = Date.now();
+
+  if (typeof state.offset !== 'number' || !Number.isFinite(state.offset) || state.offset < 0) {
+    state.offset = 0;
+  }
+  if (typeof state.lastFileSize !== 'number' || !Number.isFinite(state.lastFileSize) || state.lastFileSize < 0) {
+    state.lastFileSize = 0;
+  }
+  if (typeof state.lastTick !== 'number' || !Number.isFinite(state.lastTick) || state.lastTick < 0) {
+    state.lastTick = 0;
+  }
+
+  if (typeof state.carry !== 'string') state.carry = '';
+  if (state.carry.length > STATE_MAX_CARRY_BYTES) {
+    state.carry = state.carry.slice(-STATE_MAX_CARRY_BYTES);
+  }
+
+  if (!Array.isArray(state.suppressedEvents)) state.suppressedEvents = [];
+  if (state.suppressedEvents.length > STATE_MAX_SUPPRESSED_EVENTS) {
+    state.suppressedEvents = state.suppressedEvents.slice(-STATE_MAX_SUPPRESSED_EVENTS);
+  }
+
+  if (!Array.isArray(state.sentEventIds)) state.sentEventIds = [];
+  const uniqueSentIds = [];
+  const seenSentIds = new Set();
+  for (const id of state.sentEventIds) {
+    if (typeof id !== 'string' || !id) continue;
+    if (seenSentIds.has(id)) continue;
+    seenSentIds.add(id);
+    uniqueSentIds.push(id);
+    if (uniqueSentIds.length >= STATE_MAX_SENT_IDS) break;
+  }
+  state.sentEventIds = uniqueSentIds;
+
+  const playersObj = (state.players && typeof state.players === 'object' && !Array.isArray(state.players))
+    ? state.players
+    : {};
+  const staleMs = STATE_PLAYER_STALE_HOURS * 60 * 60 * 1000;
+  const players = Object.entries(playersObj).map(([name, entry]) => ({
+    name,
+    ...normalizePlayerStateEntry(entry, now)
+  }));
+  players.sort((a, b) => b.lastSeenTs - a.lastSeenTs);
+
+  const nextPlayers = {};
+  let kept = 0;
+  for (const p of players) {
+    const stale = (now - p.lastSeenTs) > staleMs;
+    if (!p.isAfk && stale) continue;
+    if (kept >= STATE_MAX_PLAYERS && !p.isAfk) continue;
+    nextPlayers[p.name] = { isAfk: p.isAfk, lastSeenTs: p.lastSeenTs };
+    kept++;
+  }
+  state.players = nextPlayers;
+
+  // Keep in-memory dedupe map consistent with persisted ids after trimming.
+  if (typeof sentIdSet !== 'undefined' && sentIdSet instanceof Set) {
+    sentIdSet = new Set(state.sentEventIds);
+  }
+}
+
 async function loadState() {
   try {
     const raw = await fs.readFile(STATE_FILE, 'utf8');
@@ -70,10 +144,12 @@ async function loadState() {
   } catch (e) {
     // missing state is ok
   }
+  trimState();
 }
 
 async function saveState() {
   try {
+    trimState();
     await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
   } catch (e) {
     console.error('Failed to write state:', e);
@@ -130,8 +206,8 @@ const dedupMap = new Map();
 const DEDUP_SECONDS = 10;
 
 // persistent dedupe: keep a capped list of recently-sent event ids across restarts
-const MAX_SENT_IDS = 2000;
 let sentIdSet = new Set();
+const PERSISTED_DEDUPE_TYPES = new Set(['join', 'leave', 'desync', 'death', 'research', 'evolution', 'notify', 'afk']);
 
 const EVOLUTION_NEW_TYPE_KEYS = new Set([
   'medium_biter',
@@ -153,6 +229,19 @@ const EVOLUTION_NEW_TYPE_KEYS = new Set([
   'tier_10_50',
   'tier_10_75'
 ]);
+
+const EVENT_EMOJI = {
+  join: '🟢',
+  leave: '⚪',
+  desync: '🔴',
+  afk: '💤',
+  afkBack: '🔔',
+  death: '💀',
+  research: '🔬',
+  evolution: '🧬',
+  notify: '📣',
+  unknown: '❓'
+};
 
 function formatEvolutionPercent(value) {
   const num = Number(value);
@@ -177,6 +266,32 @@ function shouldNotifyEvolutionThreshold(obj) {
   return false;
 }
 
+function normalizeNotifySeverity(value) {
+  const raw = String(value || 'info').toLowerCase();
+  if (raw === 'warn') return 'warning';
+  if (raw === 'error' || raw === 'fatal') return 'critical';
+  if (raw === 'warning' || raw === 'critical') return raw;
+  return 'info';
+}
+
+function parseAfkSeconds(obj) {
+  if (obj && obj.afk_seconds !== undefined && obj.afk_seconds !== null && obj.afk_seconds !== '') {
+    const sec = Number(obj.afk_seconds);
+    if (Number.isFinite(sec) && sec >= 0) return Math.floor(sec);
+  }
+
+  const ticks = Number(obj && obj.afk_ticks);
+  if (Number.isFinite(ticks) && ticks >= 0) {
+    return Math.floor(ticks / 60);
+  }
+  return 0;
+}
+
+function shouldPersistEventId(obj) {
+  if (!obj || !obj.type) return false;
+  return PERSISTED_DEDUPE_TYPES.has(obj.type);
+}
+
 // Build a stable id for an event to deduplicate across rotations/restarts.
 // Uses `tick` when available plus a small type-specific key.
 function getEventId(obj) {
@@ -185,15 +300,34 @@ function getEventId(obj) {
   const type = obj.type;
   let key = '';
   if (type === 'research') key = (obj.technology_localised || obj.technology || '').trim();
-  else if (type === 'death') key = `${(obj.player||'')}:${(obj.cause_localised||obj.cause||'')}:${JSON.stringify(obj.pos||'')}`;
+  else if (type === 'death') key = `${(obj.player||'')}:${(obj.cause_localised||obj.cause||'')}:${JSON.stringify(obj.pos||'')}:${(obj.surface||'')}`;
   else if (type === 'join' || type === 'leave' || type === 'afk') key = (obj.player || '');
+  else if (type === 'desync') {
+    const reasonKey = (obj.reason !== undefined && obj.reason !== null && obj.reason !== '')
+      ? obj.reason
+      : (obj.reason_id !== undefined ? obj.reason_id : '');
+    key = `${(obj.player || '')}:${reasonKey}`;
+  }
   else if (type === 'evolution') {
     const base = (obj.threshold_kind || obj.trigger || obj.message || '');
     const surf = (obj.surface || '');
     key = `${base}:${surf}`;
   }
+  else if (type === 'notify') {
+    key = `${(obj.source || '')}:${(obj.severity || obj.level || '')}:${(obj.message || obj.text || '')}`.slice(0, 200);
+  }
   else key = JSON.stringify([obj.type, obj.player || '', obj.technology || obj.message || '']).slice(0, 200);
   return `${tick}|${type}|${key}`;
+}
+
+function isSuppressedAfkEvent(event) {
+  if (!event) return false;
+  const metaType = event.meta && event.meta.type ? String(event.meta.type) : '';
+  if (metaType === 'afk') return true;
+
+  // Backward compatibility: older entries might not have meta.
+  const content = String(event.content || '');
+  return /\bAFK\b/i.test(content);
 }
 
 function buildSuppressedSummary(events) {
@@ -201,27 +335,47 @@ function buildSuppressedSummary(events) {
   const researchSet = new Set();
   let deathCount = 0;
   const deathPlayers = [];
+  let notifyCount = 0;
+  const notifySources = new Map();
   const others = [];
 
   for (const e of events) {
+    if (isSuppressedAfkEvent(e)) {
+      continue;
+    }
+
     const meta = e.meta || {};
     const content = e.content || '';
-    if (meta.type === 'research' && meta.tech) {
-      researchSet.add(meta.tech);
-    } else if (meta.type === 'death') {
+
+    if (meta.type === 'research') {
+      if (meta.tech) {
+        researchSet.add(meta.tech);
+      } else if (content) {
+        others.push(content);
+      }
+      continue;
+    }
+
+    if (meta.type === 'death') {
       deathCount++;
       if (meta.player) deathPlayers.push(meta.player);
-    } else if (content && content.startsWith('🔬')) {
-      // try to parse tech name
-      const m = content.match(/(?:odkrył|Odkryto)\s+(.+)$/i);
-      if (m && m[1]) researchSet.add(m[1].trim()); else others.push(content);
-    } else if (content && content.startsWith('💀')) {
-      deathCount++;
-      const m = content.match(/💀\s+([^\s]+)\s/);
-      if (m && m[1]) deathPlayers.push(m[1]);
-    } else {
+      continue;
+    }
+
+    if (meta.type === 'notify') {
+      notifyCount++;
+      const source = (meta.source && String(meta.source).trim()) || 'external';
+      notifySources.set(source, (notifySources.get(source) || 0) + 1);
+      continue;
+    }
+
+    if (content) {
       others.push(content);
     }
+  }
+
+  if (!researchSet.size && !deathCount && !notifyCount && !others.length) {
+    return null;
   }
 
   let lines = [];
@@ -231,7 +385,16 @@ function buildSuppressedSummary(events) {
     for (const t of researchSet) lines.push(`- ${t}`);
   }
   if (deathCount) {
-    lines.push(`Śmierci graczy: ${deathCount}` + (deathPlayers.length ? ` (lista: ${[...new Set(deathPlayers)].join(', ')})` : ''));
+    const uniqPlayers = [...new Set(deathPlayers)];
+    const playersSuffix = uniqPlayers.length ? ` (lista: ${uniqPlayers.join(', ')})` : '';
+    lines.push(`Smierci graczy: ${deathCount}${playersSuffix}`);
+  }
+  if (notifyCount) {
+    lines.push(`Powiadomienia telemetryczne: ${notifyCount}`);
+    const topSources = [...notifySources.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    for (const [source, count] of topSources) {
+      lines.push(`- ${source}: ${count}`);
+    }
   }
   if (others.length) {
     lines.push('Inne zdarzenia:');
@@ -248,9 +411,16 @@ async function postToDiscord(content, severity = 'info', meta = null) {
   const quiet = isQuietNow();
   // During quiet hours only allow critical messages through; record suppressed events
   if (quiet && severity !== 'critical') {
+    const isAfkMeta = meta && meta.type === 'afk';
+    if (isAfkMeta) {
+      return;
+    }
     try {
       state.suppressedEvents = state.suppressedEvents || [];
       state.suppressedEvents.push({ time: now, severity, content, meta });
+      if (state.suppressedEvents.length > STATE_MAX_SUPPRESSED_EVENTS) {
+        state.suppressedEvents = state.suppressedEvents.slice(-STATE_MAX_SUPPRESSED_EVENTS);
+      }
       await saveState();
     } catch (e) {
       // ignore save errors
@@ -336,24 +506,34 @@ function handleEvent(obj) {
     const t = obj.type;
     const player = obj.player || 'unknown';
 
-    function notify(content, severity = 'info') {
-      postToDiscord(content, severity).catch(() => { });
-    }
+    const notify = (content, severity = 'info', meta = null) => {
+      postToDiscord(content, severity, meta).catch(() => { });
+    };
 
     const handlers = {
-      join: () => notify(`🟢 ${player} wszedł na serwer`, 'critical'),
-      leave: () => notify(`⚪ ${player} wyszedł z serwera`, 'critical'),
+      join: () => notify(`${EVENT_EMOJI.join} ${player} wszedl na serwer`, 'critical'),
+      leave: () => notify(`${EVENT_EMOJI.leave} ${player} wyszedl z serwera`, 'critical'),
+      desync: () => {
+        const reason = (obj.reason && String(obj.reason).trim()) ? String(obj.reason).trim() : '';
+        const reasonIdRaw = Number(obj.reason_id);
+        const reasonId = Number.isFinite(reasonIdRaw) ? reasonIdRaw : null;
+        const reasonBits = [];
+        if (reason) reasonBits.push(reason);
+        if (reasonId !== null) reasonBits.push(`id:${reasonId}`);
+        const reasonSuffix = reasonBits.length ? ` (${reasonBits.join(', ')})` : '';
+        notify(`${EVENT_EMOJI.desync} ${player} rozlaczyl sie przez desync${reasonSuffix}`, 'critical');
+      },
       afk: () => {
-        const afkSeconds = Number(obj.afk_seconds || obj.afk_ticks || 0);
-        const p = state.players[player] || { isAfk: false };
+        const afkSeconds = parseAfkSeconds(obj);
+        const p = normalizePlayerStateEntry(state.players[player], Date.now());
+        p.lastSeenTs = Date.now();
+        state.players[player] = p;
         if (!p.isAfk && afkSeconds >= AFK_ON_SECONDS) {
           p.isAfk = true;
-          state.players[player] = p;
-          notify(`💤 ${player} AFK`, 'warning', { type: 'afk', player });
+          notify(`${EVENT_EMOJI.afk} ${player} AFK`, 'warning', { type: 'afk', player });
         } else if (p.isAfk && afkSeconds <= AFK_OFF_SECONDS) {
           p.isAfk = false;
-          state.players[player] = p;
-          notify(`🔔 ${player} wrócił z AFK`, 'warning', { type: 'afk', player });
+          notify(`${EVENT_EMOJI.afkBack} ${player} wrocil z AFK`, 'warning', { type: 'afk', player });
         }
       },
       death: () => {
@@ -361,13 +541,15 @@ function handleEvent(obj) {
         const cause = causeLocalised || obj.cause || obj.cause_name || '';
         const causeForce = obj.cause_force || '';
         const dmg = obj.damage_type || '';
+        const surface = (obj.surface && String(obj.surface).trim()) ? String(obj.surface).trim() : '';
         const pos = (obj.pos && Array.isArray(obj.pos) && obj.pos.length === 2) ? ` @${obj.pos[0]},${obj.pos[1]}` : '';
+        const surfaceSuffix = surface ? ` [${surface}]` : '';
         const causeText = cause || 'nieznana przyczyna';
         const parts = [causeText];
         if (causeForce) parts.push(`(${causeForce})`);
         if (dmg) parts.push(`typ:${dmg}`);
-        const detail = parts.length ? ` — ${parts.join(' ')}` : '';
-        notify(`💀 ${player} zginął${detail}${pos}`, 'info', { type: 'death', player, detail });
+        const detail = parts.length ? ` - ${parts.join(' ')}` : '';
+        notify(`${EVENT_EMOJI.death} ${player} zginal${detail}${pos}${surfaceSuffix}`, 'info', { type: 'death', player, detail, surface });
       },
       research: () => {
         const techLocalised = (obj.technology_localised && String(obj.technology_localised).trim()) ? String(obj.technology_localised).trim() : '';
@@ -375,35 +557,41 @@ function handleEvent(obj) {
         const techName = tech || 'nieznana technologia';
         const force = obj.force || '';
         const content = (force && force != 'player')
-          ? `🔬 ${force} odkrył ${techName}`
-          : `🔬 Odkryto ${techName}`;
+          ? `${EVENT_EMOJI.research} ${force} odkryl ${techName}`
+          : `${EVENT_EMOJI.research} Odkryto ${techName}`;
         notify(content, 'info', { type: 'research', tech: techName });
       },
       evolution: () => {
         if (!shouldNotifyEvolutionThreshold(obj)) return;
-        const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Próg ewolucji obcych';
+        const msg = (obj.message && String(obj.message).trim()) ? String(obj.message).trim() : 'Prog ewolucji obcych';
         const pct = formatEvolutionPercent(obj.evolution_factor);
         const suffix = pct ? ` (EF=${pct}%)` : '';
         const surface = obj.surface || '';
         const surfaceSuffix = surface ? ` on ${surface}` : '';
-        notify(`🧬 ${msg}${suffix}${surfaceSuffix}`, 'critical', { type: 'evolution', surface: surface });
+        notify(`${EVENT_EMOJI.evolution} ${msg}${suffix}${surfaceSuffix}`, 'critical', { type: 'evolution', surface: surface });
+      },
+      notify: () => {
+        const message = (obj.message && String(obj.message).trim())
+          ? String(obj.message).trim()
+          : ((obj.text && String(obj.text).trim()) ? String(obj.text).trim() : '');
+        if (!message) return;
+        const source = (obj.source && String(obj.source).trim()) ? String(obj.source).trim() : 'external';
+        const severity = normalizeNotifySeverity(obj.severity || obj.level);
+        const surface = (obj.surface && String(obj.surface).trim()) ? String(obj.surface).trim() : '';
+        const surfaceSuffix = surface ? ` [${surface}]` : '';
+        notify(`${EVENT_EMOJI.notify} [${source}] ${message}${surfaceSuffix}`, severity, { type: 'notify', source, severity });
       }
     };
 
     if (handlers[t]) {
-      // use notify wrapper that attaches meta
-      function notify(content, severity = 'info', meta = null) {
-        postToDiscord(content, severity, meta);
-      }
       handlers[t]();
     } else {
-      postToDiscord(`⚠️ ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
+      notify(`${EVENT_EMOJI.unknown} ${player}: ${t}`, 'critical', { type: 'unknown', event: t });
     }
   } catch (e) {
     console.error('handleEvent error:', e);
   }
 }
-
 async function processBuffer(buf) {
   if (!buf || buf.length === 0) return 0;
   const str = buf.toString('utf8');
@@ -423,21 +611,22 @@ async function processBuffer(buf) {
           // significant decrease -> assume restart/semantic reset
           state.sentEventIds = [];
           sentIdSet.clear();
-          console.log('Detected tick reset / restart — clearing cached sent event ids');
+          console.log('Detected tick reset / restart - clearing cached sent event ids');
         }
         state.lastTick = Math.max(state.lastTick || 0, obj.tick);
       }
 
       // dedupe using persisted sent ids
       const id = getEventId(obj);
-      if (id && sentIdSet.has(id)) continue;
+      const persistId = id && shouldPersistEventId(obj);
+      if (persistId && sentIdSet.has(id)) continue;
 
       // mark as seen and persist a capped list
-      if (id) {
+      if (persistId) {
         sentIdSet.add(id);
         state.sentEventIds = state.sentEventIds || [];
         state.sentEventIds.unshift(id);
-        if (state.sentEventIds.length > MAX_SENT_IDS) state.sentEventIds.length = MAX_SENT_IDS;
+        if (state.sentEventIds.length > STATE_MAX_SENT_IDS) state.sentEventIds.length = STATE_MAX_SENT_IDS;
         // persist async
         saveState().catch(() => {});
       }
@@ -509,3 +698,4 @@ loop().catch((e) => {
   console.error('Fatal error:', e);
   process.exit(1);
 });
+

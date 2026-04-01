@@ -1,47 +1,47 @@
 # Factorio Telemetry Relay -> Discord
 
-This small Node.js app tails a Factorio mod's JSON Lines file (written to `script-output/telemetry.jsonl`) over SFTP or FTP and posts human-readable messages to a Discord channel via webhook.
+This Node.js app tails a Factorio JSON Lines telemetry file (`script-output/telemetry.jsonl`) over SFTP or FTP and forwards readable messages to Discord via webhook.
 
 Quick start
 
-1. Create a Discord webhook for the target channel and copy its URL.
-   - Server Settings -> Integrations -> Webhooks -> New Webhook -> copy Webhook URL.
-2. Copy `.env.example` to `.env` and fill values (`DISCORD_WEBHOOK_URL`, `PROTOCOL`, connection details, etc.).
-3. Install deps and run:
+1. Create a Discord webhook URL for the target channel.
+2. Copy `.env.example` to `.env` and fill required values.
+3. Install dependencies and run:
 
 ```bash
 npm install
 node src/relay.js
 ```
 
-Where the Factorio mod writes telemetry: typically `script-output/telemetry.jsonl` on the host running Factorio. Set `REMOTE_PATH` accordingly.
-
 Behavior
-- Polls the remote file every `POLL_SECONDS` (default 15s).
-- Reads only new bytes (incremental), handles truncation/rotation by resetting offset.
-- Keeps local state in `relay_state.json` to avoid duplicate messages across restarts.
+- Polls the remote file every `POLL_SECONDS` (default: 15s).
+- Reads only new bytes and handles truncation/rotation by resetting offset.
+- Persists progress and dedupe state in `relay_state.json`.
 
-Events mapping
-- join  -> 🟢 <player> wszedł na serwer
-- leave -> ⚪ <player> wyszedł z serwera
-- afk   -> keeps per-player AFK state and emits transitions only:
-  - `afk_seconds >= AFK_ON_SECONDS` and previously not AFK -> 💬 "💤 <player> AFK"
-  - `afk_seconds <= AFK_OFF_SECONDS` and previously AFK -> 🔔 "🔔 <player> wrócił z AFK"
-- evolution threshold -> 🧬 informacje o progach ewolucji tylko wtedy, gdy pojawiają się nowe typy przeciwników lub zmiany dominanty
-  - relay ignoruje inne progi (np. znikanie małych biterów) oraz zdarzenia "down"
+Event mapping
+- `join` -> critical message
+- `leave` -> critical message
+- `desync` -> critical message with reason details
+- `afk` -> warning transitions only (`AFK` / `returned from AFK`)
+- `death` -> info message
+- `research` -> info message
+- `evolution` -> critical only for selected threshold-up events
+- `notify` -> forwards custom telemetry notices from mods (`severity`: `info`/`warning`/`critical`)
 
 Quiet hours and pings
-- Controlled by `TIMEZONE`, `QUIET_HOURS_START` and `QUIET_HOURS_END` (supports intervals crossing midnight).
-- If `PING_ROLE_ID` is set and not in quiet hours, the relay may ping the role for critical events (see `PING_ON_CRITICAL_ONLY`). During quiet hours no pings are issued.
+- Controlled by `TIMEZONE`, `QUIET_HOURS_START`, `QUIET_HOURS_END`.
+- During quiet hours, non-critical messages are suppressed.
+- AFK messages are excluded from quiet-hours summary.
 
-Reliability
-- Network operations have retries with exponential backoff.
-- Identical messages are rate-limited (won't be sent more often than once per 10s).
+State trimming
+- `relay_state.json` is trimmed automatically:
+  - bounded dedupe ids (`STATE_MAX_SENT_IDS`)
+  - bounded suppressed events (`STATE_MAX_SUPPRESSED_EVENTS`)
+  - bounded carry buffer (`STATE_MAX_CARRY_BYTES`)
+  - stale/inactive player AFK entries pruned (`STATE_PLAYER_STALE_HOURS`, `STATE_MAX_PLAYERS`)
+- Persistent dedupe excludes `afk` events to keep state small.
 
 Files
-- `src/relay.js` – main program
-- `.env.example` – example env vars
-- `package.json` – dependencies
-
-Questions or improvements
-- You can extend event->severity mapping or add richer Discord embeds. If you want, I can add metrics, Prometheus, or a Dockerfile.
+- `src/relay.js` - main program
+- `.env.example` - environment template
+- `package.json` - dependencies

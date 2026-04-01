@@ -3,8 +3,11 @@
 Lightweight, runtime-only Factorio mod that writes one JSON object per line to `script-output/telemetry.jsonl`.
 
 **Overview**
-- Records small telemetry events (examples: `join`, `leave`, `afk`, `death`, `research`, `evolution`) in JSON Lines format so external relays can read and forward them.
+- Records small telemetry events (examples: `join`, `leave`, `desync`, `afk`, `death`, `research`, `evolution`) in JSON Lines format so external relays can read and forward them.
+- Provides a remote API for other runtime mods to emit `notify` telemetry lines without writing files directly.
 - Emits evolution events (`type: "evolution"`) for periodic polling and on threshold crossings; evolution events may include optional dominance information.
+- Emits `type: "desync"` on `on_pre_player_left_game` only when disconnect reason is `desync_limit_reached` (strict mode), with fields `reason` and `reason_id`.
+- Can emit `type: "notify"` telemetry from `programmable-speaker` alerts based on configured circuit signal conditions, with anti-spam protections (rising-edge trigger, per-speaker cooldown, global per-scan cap).
 
 **Install / Packaging**
 1. Pack the `telemetry-mod` folder as a ZIP (or copy the folder) into Factorio's `mods` directory.
@@ -17,10 +20,14 @@ Lightweight, runtime-only Factorio mod that writes one JSON object per line to `
 - Key defaults:
   - Log file: `telemetry.jsonl`
   - AFK poll interval: 15 seconds (AFK ticks = 15 * 60)
+  - Speaker notify scan interval: 5 seconds
+  - Speaker notify cooldown per entity: 60 seconds
+  - Speaker notify max events per scan: 5
   - Max buffered bytes: 50 KB (the mod bounds the file by size)
   - Max entry age: 24 hours
 - The mod buffers lines in `global.telemetry_buffer` and periodically overwrites the log file; it prunes entries by age and total bytes to keep the file bounded.
 - If the runtime environment lacks a write backend, `control.lua` detects this (`detect_write_backend`) and falls back to the best available approach or no-op.
+- Speaker telemetry setup: enable the runtime setting `telemetry-speaker-notify-enabled`, then open a `programmable-speaker` and use the mod GUI checkbox (`Send telemetry from this speaker`). The speaker still needs `show alert` enabled, a circuit condition (`if <signal> ...`) and optional `alert message` (used as telemetry text).
 
 **Testing / examples**
 - To test without running Factorio, append valid JSON Lines to `script-output/telemetry.jsonl` (one JSON object per line).
@@ -29,7 +36,26 @@ Lightweight, runtime-only Factorio mod that writes one JSON object per line to `
 {"tick":1234,"type":"join","player":"PlayerOne"}
 {"tick":1240,"type":"afk","player":"PlayerOne","afk_ticks":900,"afk_seconds":15}
 {"tick":2000,"type":"leave","player":"PlayerOne"}
+{"tick":2050,"type":"desync","player":"PlayerOne","reason":"desync_limit_reached","reason_id":123}
 {"tick":3500,"type":"evolution","trigger":"threshold","force":"enemy","evolution_factor":0.5,"threshold":0.5,"threshold_kind":"tier","threshold_key":"big_biter_spitter_worm","direction":"up","include_dominance":true,"message":"Enemy evolution 50%: big biters/spitters and big worms may appear."}
+{"tick":3600,"type":"notify","source":"my_mod","severity":"warning","message":"Rocket silo low power","origin":"remote","surface":"nauvis","tags":["power","silo"]}
+{"tick":4200,"type":"notify","source":"programmable-speaker","severity":"warning","message":"Iron buffer low","origin":"speaker","surface":"nauvis","category":"signal","code":"speaker-1234","tags":["programmable-speaker","signal-trigger","signal:virtual/signal-I"]}
+
+Remote interface (`telemetry_mod`)
+- `notify(payload)` -> emits a `type:"notify"` telemetry line and raises a runtime event for subscribers.
+- `get_notify_event_id()` -> returns custom event id raised for `notify` payloads.
+- Existing evolution API remains unchanged (`get_evolution_event_id`, `get_enemy_evolution`, etc.).
+
+Example:
+```lua
+remote.call("telemetry_mod", "notify", {
+  source = "my_mod",
+  severity = "warning", -- info|warning|critical (warn/error aliases are normalized)
+  message = "Assembler line is starved",
+  surface = "nauvis",
+  tags = { "production", "inputs" }
+})
+```
 
 **Localization**
 - The mod includes localization files under `locale/` (`en` and `pl`). Update translations in the appropriate locale files.
@@ -37,12 +63,29 @@ Lightweight, runtime-only Factorio mod that writes one JSON object per line to `
 **Notes for integrators / relays**
 - Preserve the event schema (the `type` values and required fields). External relays (for example, [bot/src/relay.js](bot/src/relay.js#L1)) depend on these fields.
 - The mod attempts to provide `cause_localised` strings for death events via a translator player; if unavailable it falls back to internal names.
+- Death telemetry includes `surface` when it can be resolved from event/cause/player context.
 - Do not change the semantics of fields without coordinating matching updates in both the mod and any relay components.
 
 **Files to review**
-- `control.lua` — main mod logic.
-- `settings.lua` — potential runtime settings (if present).
-- `locale/` — localization and translations.
-- `pack-mod.ps1` — helper script for packaging the mod (in the `mod/` folder).
+- `control.lua` - main mod logic.
+- `runtime/common.lua` - shared string/locale/surface helpers.
+- `runtime/evolution_thresholds.lua` - evolution threshold definitions and selection logic.
+- `runtime/write_backend.lua` - backend detection for `helpers.write_file` / `game.write_file`.
+- `runtime/jsonl_buffer.lua` - bounded JSONL buffer writer (size/age pruning + flush).
+- `runtime/translation_runtime.lua` - translation request/caching flow + stale pending resolution.
+- `runtime/lifecycle.lua` - event registration + init/config/runtime-setting lifecycle wiring.
+- `runtime/events/join.lua` - join event output.
+- `runtime/events/leave.lua` - leave event output.
+- `runtime/events/desync.lua` - strict desync detection/output.
+- `runtime/events/afk.lua` - periodic AFK polling/output.
+- `runtime/events/evolution.lua` - evolution polling, threshold crossings and chat/event emission.
+- `runtime/events/notify.lua` - normalization and emission of `type:"notify"` telemetry.
+- `runtime/events/speaker_notify.lua` - programmable-speaker signal polling + anti-spam notify emission.
+- `runtime/events/speaker_gui.lua` - per-speaker mod GUI checkbox and persistence.
+- `runtime/events/death.lua` - death event enrichment and output formatting.
+- `runtime/events/research.lua` - research event extraction and output formatting.
+- `settings.lua` - potential runtime settings (if present).
+- `locale/` - localization and translations.
+- `pack-mod.ps1` - helper script for packaging the mod (in the `mod/` folder).
 
 If you want, I can create a sample `telemetry.jsonl` with test events or update the relay documentation with an example `bot` configuration.

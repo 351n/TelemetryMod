@@ -118,5 +118,39 @@ data:extend({
     default_value = "enemy",
     allow_blank = false,
     order = "e-g"
+  },
+  {
+    type = "bool-setting",
+    name = "telemetry-speaker-notify-enabled",
+    setting_type = "runtime-global",
+    default_value = false,
+    order = "e-h"
+  },
+  {
+    type = "int-setting",
+    name = "telemetry-speaker-notify-interval-seconds",
+    setting_type = "runtime-global",
+    default_value = 5,
+    minimum_value = 1,
+    maximum_value = 3600,
+    order = "e-i"
+  },
+  {
+    type = "int-setting",
+    name = "telemetry-speaker-notify-cooldown-seconds",
+    setting_type = "runtime-global",
+    default_value = 60,
+    minimum_value = 1,
+    maximum_value = 86400,
+    order = "e-j"
+  },
+  {
+    type = "int-setting",
+    name = "telemetry-speaker-notify-max-events-per-poll",
+    setting_type = "runtime-global",
+    default_value = 5,
+    minimum_value = 1,
+    maximum_value = 100,
+    order = "e-k"
   }
 })
