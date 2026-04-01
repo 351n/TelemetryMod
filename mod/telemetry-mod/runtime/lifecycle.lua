@@ -58,6 +58,21 @@ function M.new(opts)
     script.on_event(defines.events.on_player_joined_game, handlers.on_player_joined)
     script.on_event(defines.events.on_player_left_game, handlers.on_player_left)
     pcall(function() script.on_event(defines.events.on_pre_player_left_game, handlers.on_pre_player_left) end)
+    if handlers.on_tick then
+      script.on_event(defines.events.on_tick, handlers.on_tick)
+    end
+    if handlers.on_gui_opened then
+      script.on_event(defines.events.on_gui_opened, handlers.on_gui_opened)
+    end
+    if handlers.on_gui_closed then
+      script.on_event(defines.events.on_gui_closed, handlers.on_gui_closed)
+    end
+    if handlers.on_gui_checked_state_changed then
+      script.on_event(defines.events.on_gui_checked_state_changed, handlers.on_gui_checked_state_changed)
+    end
+    if handlers.on_entity_settings_pasted then
+      script.on_event(defines.events.on_entity_settings_pasted, handlers.on_entity_settings_pasted)
+    end
     script.on_nth_tick(get_afk_interval_ticks(), handlers.afk_poll)
     script.on_nth_tick(get_evolution_interval_ticks(), handlers.evolution_poll)
     pcall(function() script.on_event(defines.events.on_player_died, handlers.on_player_died) end)

@@ -28,6 +28,10 @@ local DEFAULT_EVOLUTION_NOTIFY_CHAT = true -- emit chat/server messages on thres
 local DEFAULT_EVOLUTION_FORCE_NAME = "enemy" -- which force to observe (usually "enemy")
 local DEFAULT_EVOLUTION_SURFACE_NAME = "nauvis" -- which surface to observe for evolution
 local DEFAULT_EVOLUTION_SURFACE_NAMES = "nauvis" -- comma/space-separated surface names
+local DEFAULT_SPEAKER_NOTIFY_ENABLED = false
+local DEFAULT_SPEAKER_NOTIFY_INTERVAL_SECONDS = 5
+local DEFAULT_SPEAKER_NOTIFY_COOLDOWN_SECONDS = 60
+local DEFAULT_SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL = 5
 local LOG_FILE = DEFAULT_LOG_FILE
 local AFK_INTERVAL_TICKS = DEFAULT_AFK_INTERVAL_SECONDS * 60 -- ticks
 local DEBUG = DEFAULT_DEBUG
@@ -47,6 +51,10 @@ local EVOLUTION_FORCE_NAME = DEFAULT_EVOLUTION_FORCE_NAME
 local EVOLUTION_SURFACE_NAME = DEFAULT_EVOLUTION_SURFACE_NAME
 local EVOLUTION_SURFACE_NAMES = { DEFAULT_EVOLUTION_SURFACE_NAME }
 local EVOLUTION_SURFACE_NAMES_STR = DEFAULT_EVOLUTION_SURFACE_NAMES
+local SPEAKER_NOTIFY_ENABLED = DEFAULT_SPEAKER_NOTIFY_ENABLED
+local SPEAKER_NOTIFY_INTERVAL_TICKS = DEFAULT_SPEAKER_NOTIFY_INTERVAL_SECONDS * 60
+local SPEAKER_NOTIFY_COOLDOWN_TICKS = DEFAULT_SPEAKER_NOTIFY_COOLDOWN_SECONDS * 60
+local SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL = DEFAULT_SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL
 
 -- Keep track of last registered nth_tick values so setting changes do not leave stale handlers behind.
 local LAST_AFK_INTERVAL_TICKS = AFK_INTERVAL_TICKS
@@ -63,6 +71,8 @@ local leave_event_runtime = require("runtime.events.leave")
 local desync_event_runtime = require("runtime.events.desync")
 local afk_event_runtime = require("runtime.events.afk")
 local evolution_event_runtime = require("runtime.events.evolution")
+local speaker_notify_runtime = require("runtime.events.speaker_notify")
+local speaker_gui_runtime = require("runtime.events.speaker_gui")
 local write_backend_runtime = require("runtime.write_backend")
 local jsonl_buffer_runtime = require("runtime.jsonl_buffer")
 local translation_runtime = require("runtime.translation_runtime")
@@ -80,6 +90,8 @@ local leave_event_api = nil
 local desync_event_api = nil
 local afk_event_api = nil
 local evolution_event_api = nil
+local speaker_notify_api = nil
+local speaker_gui_api = nil
 local telemetry_writer = nil
 local translation_api = nil
 local death_telemetry_api = nil
@@ -92,6 +104,48 @@ end
 
 local function parse_surface_list(raw)
   return common.parse_surface_list(raw, DEFAULT_EVOLUTION_SURFACE_NAME)
+end
+
+local function ensure_notify_state()
+  if not global then return nil end
+  global.telemetry_notify_state = global.telemetry_notify_state or {}
+  local st = global.telemetry_notify_state
+  st.speakers = st.speakers or {}
+  st.speaker_enabled = st.speaker_enabled or {}
+  st.speaker_gui_players = st.speaker_gui_players or {}
+  return st
+end
+
+local function get_speaker_enabled(unit_key)
+  local key = tostring(unit_key or "")
+  if key == "" then return false end
+  local st = ensure_notify_state()
+  if not st then return false end
+  return st.speaker_enabled[key] == true
+end
+
+local function set_speaker_enabled(unit_key, enabled)
+  local key = tostring(unit_key or "")
+  if key == "" then return end
+  local st = ensure_notify_state()
+  if not st then return end
+  if enabled == true then
+    st.speaker_enabled[key] = true
+  else
+    st.speaker_enabled[key] = nil
+  end
+end
+
+local function prune_speaker_state(seen_units)
+  local st = ensure_notify_state()
+  if not st then return end
+  if not seen_units then return end
+
+  for unit_key, _ in pairs(st.speaker_enabled) do
+    if not seen_units[unit_key] then
+      st.speaker_enabled[unit_key] = nil
+    end
+  end
 end
 
 local function safe_game_print(msg)
@@ -232,6 +286,43 @@ end
 emit_external_notify = function(payload, origin)
   local api = ensure_notify_api()
   return api.emit(payload, origin)
+end
+
+local function ensure_speaker_notify_api()
+  if speaker_notify_api then return speaker_notify_api end
+  speaker_notify_api = speaker_notify_runtime.new({
+    emit_external_notify = function(payload, origin)
+      if not emit_external_notify then
+        return false, "notify backend not ready"
+      end
+      return emit_external_notify(payload, origin)
+    end,
+    localised_fallback = localised_fallback,
+    safe_log = safe_log,
+    is_speaker_enabled = get_speaker_enabled,
+    prune_speaker_state = prune_speaker_state,
+    get_config = function()
+      return {
+        enabled = SPEAKER_NOTIFY_ENABLED == true,
+        interval_ticks = SPEAKER_NOTIFY_INTERVAL_TICKS,
+        cooldown_ticks = SPEAKER_NOTIFY_COOLDOWN_TICKS,
+        max_events_per_poll = SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL,
+        default_interval_ticks = DEFAULT_SPEAKER_NOTIFY_INTERVAL_SECONDS * 60,
+        default_cooldown_ticks = DEFAULT_SPEAKER_NOTIFY_COOLDOWN_SECONDS * 60,
+        default_max_events_per_poll = DEFAULT_SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL
+      }
+    end
+  })
+  return speaker_notify_api
+end
+
+local function ensure_speaker_gui_api()
+  if speaker_gui_api then return speaker_gui_api end
+  speaker_gui_api = speaker_gui_runtime.new({
+    get_speaker_enabled = get_speaker_enabled,
+    set_speaker_enabled = set_speaker_enabled
+  })
+  return speaker_gui_api
 end
 
 -- Evolution telemetry (enemy evolution factor) ---------------------------------
@@ -468,6 +559,26 @@ local function afk_poll(event)
   ensure_afk_event_api().afk_poll(event)
 end
 
+local function on_tick(event)
+  ensure_speaker_notify_api().on_tick(event)
+end
+
+local function on_gui_opened(event)
+  ensure_speaker_gui_api().on_gui_opened(event)
+end
+
+local function on_gui_closed(event)
+  ensure_speaker_gui_api().on_gui_closed(event)
+end
+
+local function on_gui_checked_state_changed(event)
+  ensure_speaker_gui_api().on_gui_checked_state_changed(event)
+end
+
+local function on_entity_settings_pasted(event)
+  ensure_speaker_gui_api().on_entity_settings_pasted(event)
+end
+
 local function ensure_runtime_state()
   if not global then return end
   global.telemetry_buffer = global.telemetry_buffer or { entries = {}, total_bytes = 0 }
@@ -477,7 +588,7 @@ local function ensure_runtime_state()
   global.pending_death_translations = global.pending_death_translations or {}
   global.pending_evolution_translations = global.pending_evolution_translations or {}
   global.telemetry_afk_state = global.telemetry_afk_state or {}
-  global.telemetry_notify_state = global.telemetry_notify_state or {}
+  ensure_notify_state()
   global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
 end
 
@@ -532,6 +643,16 @@ apply_settings = function()
   EVOLUTION_SURFACE_NAMES_STR = tostring(read_setting("telemetry-evolution-surface-names", DEFAULT_EVOLUTION_SURFACE_NAMES) or DEFAULT_EVOLUTION_SURFACE_NAMES)
   EVOLUTION_SURFACE_NAMES = parse_surface_list(EVOLUTION_SURFACE_NAMES_STR)
   EVOLUTION_FORCE_NAME = tostring(read_setting("telemetry-evolution-force-name", DEFAULT_EVOLUTION_FORCE_NAME) or DEFAULT_EVOLUTION_FORCE_NAME)
+  SPEAKER_NOTIFY_ENABLED = read_setting("telemetry-speaker-notify-enabled", DEFAULT_SPEAKER_NOTIFY_ENABLED) == true
+  local speaker_interval_secs = tonumber(read_setting("telemetry-speaker-notify-interval-seconds", DEFAULT_SPEAKER_NOTIFY_INTERVAL_SECONDS)) or DEFAULT_SPEAKER_NOTIFY_INTERVAL_SECONDS
+  SPEAKER_NOTIFY_INTERVAL_TICKS = math.max(1, math.floor(speaker_interval_secs)) * 60
+  local speaker_cooldown_secs = tonumber(read_setting("telemetry-speaker-notify-cooldown-seconds", DEFAULT_SPEAKER_NOTIFY_COOLDOWN_SECONDS)) or DEFAULT_SPEAKER_NOTIFY_COOLDOWN_SECONDS
+  SPEAKER_NOTIFY_COOLDOWN_TICKS = math.max(1, math.floor(speaker_cooldown_secs)) * 60
+  local speaker_max_events = tonumber(read_setting("telemetry-speaker-notify-max-events-per-poll", DEFAULT_SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL)) or DEFAULT_SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL
+  SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL = math.max(1, math.floor(speaker_max_events))
+  if global and not SPEAKER_NOTIFY_ENABLED and global.telemetry_notify_state then
+    global.telemetry_notify_state.speakers = {}
+  end
 
   -- Avoid leaving stale nth_tick handlers behind
   if LAST_EVOLUTION_INTERVAL_TICKS and (LAST_EVOLUTION_INTERVAL_TICKS ~= EVOLUTION_INTERVAL_TICKS or not EVOLUTION_ENABLED) then
@@ -567,6 +688,11 @@ local function ensure_lifecycle_api()
       on_pre_player_left = on_pre_player_left,
       afk_poll = afk_poll,
       evolution_poll = evolution_poll,
+      on_tick = on_tick,
+      on_gui_opened = on_gui_opened,
+      on_gui_closed = on_gui_closed,
+      on_gui_checked_state_changed = on_gui_checked_state_changed,
+      on_entity_settings_pasted = on_entity_settings_pasted,
       on_player_died = on_player_died,
       on_research_finished = on_research_finished,
       on_string_translated = on_string_translated

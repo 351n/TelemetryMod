@@ -207,7 +207,7 @@ const DEDUP_SECONDS = 10;
 
 // persistent dedupe: keep a capped list of recently-sent event ids across restarts
 let sentIdSet = new Set();
-const PERSISTED_DEDUPE_TYPES = new Set(['join', 'leave', 'desync', 'death', 'research', 'evolution', 'notify']);
+const PERSISTED_DEDUPE_TYPES = new Set(['join', 'leave', 'desync', 'death', 'research', 'evolution', 'notify', 'afk']);
 
 const EVOLUTION_NEW_TYPE_KEYS = new Set([
   'medium_biter',
