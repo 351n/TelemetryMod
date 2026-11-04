@@ -71,8 +71,8 @@ function M.new(opts)
   }
 
   local function get_cache(cache_key, locale, key)
-    if not global or not locale or not key then return nil end
-    local cache = global[cache_key]
+    if not storage or not locale or not key then return nil end
+    local cache = storage[cache_key]
     if cache and cache[locale] and cache[locale][key] then
       return cache[locale][key]
     end
@@ -80,10 +80,10 @@ function M.new(opts)
   end
 
   local function put_cache(cache_key, locale, key, translated)
-    if not global or not locale or not key or not translated then return end
-    global[cache_key] = global[cache_key] or {}
-    global[cache_key][locale] = global[cache_key][locale] or {}
-    global[cache_key][locale][key] = translated
+    if not storage or not locale or not key or not translated then return end
+    storage[cache_key] = storage[cache_key] or {}
+    storage[cache_key][locale] = storage[cache_key][locale] or {}
+    storage[cache_key][locale][key] = translated
   end
 
   local function pick_translator_player_tlm(force_obj)
@@ -112,37 +112,37 @@ function M.new(opts)
   end
 
   local function flush_stale_death_translations()
-    if not global or not global.pending_death_translations or not game or not game.tick then return end
+    if not storage or not storage.pending_death_translations or not game or not game.tick then return end
     if not handlers.write_death_line then return end
     local now = game.tick
     local timeout = DEFAULT_DEATH_TRANSLATION_TIMEOUT_TICKS
-    for id, meta in pairs(global.pending_death_translations) do
+    for id, meta in pairs(storage.pending_death_translations) do
       if meta and meta.request_tick and (now - meta.request_tick) > timeout then
         handlers.write_death_line(meta.tick or now, meta.player, meta.info, meta.info and meta.info.cause_name)
-        global.pending_death_translations[id] = nil
+        storage.pending_death_translations[id] = nil
       end
     end
   end
 
   local function flush_stale_research_translations()
-    if not global or not global.pending_research_translations or not game or not game.tick then return end
+    if not storage or not storage.pending_research_translations or not game or not game.tick then return end
     if not handlers.write_research_line then return end
     local now = game.tick
     local timeout = DEFAULT_TECH_TRANSLATION_TIMEOUT_TICKS
-    for id, meta in pairs(global.pending_research_translations) do
+    for id, meta in pairs(storage.pending_research_translations) do
       if meta and meta.request_tick and (now - meta.request_tick) > timeout then
         handlers.write_research_line(meta.tick or now, meta.technology, meta.technology, meta.force, meta.player)
-        global.pending_research_translations[id] = nil
+        storage.pending_research_translations[id] = nil
       end
     end
   end
 
   local function flush_stale_evolution_translations()
-    if not global or not global.pending_evolution_translations or not game or not game.tick then return end
+    if not storage or not storage.pending_evolution_translations or not game or not game.tick then return end
     if not handlers.emit_threshold then return end
     local now = game.tick
     local timeout = DEFAULT_EVOLUTION_TRANSLATION_TIMEOUT_TICKS
-    for id, meta in pairs(global.pending_evolution_translations) do
+    for id, meta in pairs(storage.pending_evolution_translations) do
       if meta and meta.request_tick and (now - meta.request_tick) > timeout then
         local msg_string = localised_fallback(meta.message_localised or "")
         handlers.emit_threshold(
@@ -155,18 +155,18 @@ function M.new(opts)
           meta.message_localised,
           meta.surface
         )
-        global.pending_evolution_translations[id] = nil
+        storage.pending_evolution_translations[id] = nil
       end
     end
   end
 
   local function on_string_translated(event)
-    if not event or not global then return end
+    if not event or not storage then return end
 
-    if global.pending_research_translations then
-      local meta = global.pending_research_translations[event.id]
+    if storage.pending_research_translations then
+      local meta = storage.pending_research_translations[event.id]
       if meta then
-        global.pending_research_translations[event.id] = nil
+        storage.pending_research_translations[event.id] = nil
 
         if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
           return
@@ -185,10 +185,10 @@ function M.new(opts)
       end
     end
 
-    if global.pending_death_translations then
-      local meta = global.pending_death_translations[event.id]
+    if storage.pending_death_translations then
+      local meta = storage.pending_death_translations[event.id]
       if meta then
-        global.pending_death_translations[event.id] = nil
+        storage.pending_death_translations[event.id] = nil
 
         if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
           return
@@ -208,10 +208,10 @@ function M.new(opts)
       end
     end
 
-    if global.pending_evolution_translations then
-      local meta = global.pending_evolution_translations[event.id]
+    if storage.pending_evolution_translations then
+      local meta = storage.pending_evolution_translations[event.id]
       if meta then
-        global.pending_evolution_translations[event.id] = nil
+        storage.pending_evolution_translations[event.id] = nil
 
         if meta.player_index and event.player_index and meta.player_index ~= event.player_index then
           return

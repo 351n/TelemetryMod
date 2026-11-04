@@ -142,13 +142,13 @@ function M.new(opts)
       end
 
       if info.cause_localised and translator.request_translation then
-        global.pending_death_translations = global.pending_death_translations or {}
+        storage.pending_death_translations = storage.pending_death_translations or {}
         local id = nil
         local ok = pcall(function()
           id = translator.request_translation(info.cause_localised)
         end)
         if ok and id then
-          global.pending_death_translations[id] = {
+          storage.pending_death_translations[id] = {
             tick = tick,
             request_tick = tick,
             player = player_name,

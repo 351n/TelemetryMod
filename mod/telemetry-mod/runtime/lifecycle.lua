@@ -33,7 +33,7 @@ function M.new(opts)
   end
 
   local function on_configuration_changed(data)
-    if global then
+    if storage then
       ensure_runtime_state()
     end
 

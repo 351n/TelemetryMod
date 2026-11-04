@@ -5,8 +5,8 @@ globals = {
   "defines",
   "rendering",
   "commands",
-  "global",
   "storage",
   "helpers",
-  "log"
+  "log",
+  "rcon"
 }

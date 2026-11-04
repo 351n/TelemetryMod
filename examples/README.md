@@ -11,8 +11,6 @@ Copy each example's configuration template to its local `.env` or `config.json` 
 
 The OBS and Discord UDP examples cannot both bind port 34199 at the same time. Use one UDP receiver and a different transport for Discord, such as RCON or JSONL.
 
-The old `bot/` local launcher, `.env`, state and sample data are not migrated automatically. To migrate, copy its `.env` into `discord-jsonl/.env` and review settings; the first snapshot starts a new baseline. The old `obs-bridge/` configuration must be copied manually to `obs/config.json`. Do not copy secrets into tracked files.
-
 Snapshot transports use longest suffix/prefix overlap. Factorio does not supply unique event identifiers: identical events and a fully pruned window can be ambiguous. On lost overlap or tick reset, the bridge logs a warning and sets a new baseline without replaying the window; some events can be lost. UDP is best-effort and has no history.
 
 The Discord examples retry webhook failures, then log and drop the message; snapshot progress can advance even if delivery failed. They are non-critical examples, not a guaranteed-delivery queue. Automated tests use local test services; validate your own Factorio, Discord and OBS setup before relying on an integration.

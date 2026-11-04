@@ -24,9 +24,9 @@ function M.new(opts)
   end
 
   local function ensure_notify_state()
-    if not global then return nil end
-    global.telemetry_notify_state = global.telemetry_notify_state or {}
-    local st = global.telemetry_notify_state
+    if not storage then return nil end
+    storage.telemetry_notify_state = storage.telemetry_notify_state or {}
+    local st = storage.telemetry_notify_state
     st.speaker_gui_players = st.speaker_gui_players or {}
     return st
   end

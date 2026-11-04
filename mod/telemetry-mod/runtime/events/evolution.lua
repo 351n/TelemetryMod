@@ -59,12 +59,12 @@ function M.new(opts)
   end
 
   local function ensure_evolution_state()
-    if not global then return nil end
+    if not storage then return nil end
     local cfg = get_config() or {}
     local default_surface_name = cfg.default_surface_name or "nauvis"
 
-    global.telemetry_evolution = global.telemetry_evolution or {}
-    local st = global.telemetry_evolution
+    storage.telemetry_evolution = storage.telemetry_evolution or {}
+    local st = storage.telemetry_evolution
 
     -- Migrate older single-surface format to per-surface map.
     if st.last_checked_factor ~= nil or st.last_logged_factor ~= nil or st.unlogged_delta ~= nil or st.prev_poll_factor ~= nil then
@@ -86,7 +86,7 @@ function M.new(opts)
   end
 
   local function ensure_evolution_surface_state(surface_name)
-    if not global then return nil end
+    if not storage then return nil end
     local st = ensure_evolution_state()
     if not st then return nil end
     st.surfaces = st.surfaces or {}
@@ -154,13 +154,13 @@ function M.new(opts)
 
     local msg_string, pending = resolve_localised_or_request(msg_localised, force_obj)
     if pending then
-      if not global then
+      if not storage then
         msg_string = localised_fallback(msg_localised)
         emit_threshold(tick, force_name, current_factor, th, direction, msg_string, msg_localised, surface_name, chat_enabled, include_dominance)
         return
       end
-      global.pending_evolution_translations = global.pending_evolution_translations or {}
-      global.pending_evolution_translations[pending.id] = {
+      storage.pending_evolution_translations = storage.pending_evolution_translations or {}
+      storage.pending_evolution_translations[pending.id] = {
         tick = tick,
         request_tick = tick,
         force_name = force_name,

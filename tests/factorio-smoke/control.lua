@@ -1,7 +1,5 @@
 -- Runtime smoke checks for Telemetry Mod outputs. Runs only in an isolated test save.
 
-if not global and storage then global = storage end
-
 local outputs = require("__telemetry-mod__.runtime.telemetry_outputs")
 
 local function expect(condition, message)
@@ -25,7 +23,7 @@ local function run_output_unit_checks()
   local writes, packets, warnings = {}, {}, {}
   local udp_fails = false
   local jsonl_fails = false
-  global.telemetry_buffer = nil
+  storage.telemetry_buffer = nil
 
   local router = outputs.new({
     write_file_safe = function(filename, content, append)
@@ -90,7 +88,7 @@ local function run_output_unit_checks()
   config.rcon_enabled = true
   config.rcon_window_events = 1
   config.max_bytes = 20
-  global.telemetry_buffer = nil
+  storage.telemetry_buffer = nil
   tick = tick + 1
   router.record('{"type":"first"}')
   tick = tick + 1
@@ -100,8 +98,26 @@ local function run_output_unit_checks()
   expect(snapshot:find('"type":"first"', 1, true) == nil, "RCON limit and byte trimming")
 end
 
+local function run_speaker_api_checks()
+  local surface = game.surfaces[1]
+  local position = surface.find_non_colliding_position("programmable-speaker", {0, 0}, 128, 1)
+  expect(position ~= nil, "speaker test position")
+  local speaker = surface.create_entity({name = "programmable-speaker", position = position, force = "player"})
+  expect(speaker and speaker.valid, "speaker creation")
+  local behavior = speaker.get_or_create_control_behavior()
+  expect(behavior and behavior.valid, "speaker control behavior")
+  behavior.circuit_condition = {first_signal = {type = "virtual", name = "signal-A"}, comparator = ">", constant = 0}
+  speaker.alert_parameters = {show_alert = true, show_on_map = false, icon_signal_id = {type = "virtual", name = "signal-A"}, alert_message = "Telemetry smoke"}
+  local condition = behavior.circuit_condition
+  local alert = speaker.alert_parameters
+  expect(condition.first_signal and condition.first_signal.name == "signal-A", "speaker circuit condition API")
+  expect(alert.show_alert and alert.alert_message == "Telemetry smoke", "speaker alert parameters API")
+  speaker.destroy()
+end
+
 script.on_init(function()
   run_output_unit_checks()
+  run_speaker_api_checks()
   local result = remote.call("telemetry_mod", "notify", {
     source = "smoke",
     severity = "warning",

@@ -1,4 +1,12 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.3.0
+Date: 2026-11-04
+  Changes:
+    - Updated the mod for Factorio 2.1.
+    - Preserved the existing telemetry event schema and remote interface.
+  Bugfixes:
+    - Use runtime storage directly so saved telemetry remains accessible after loading or migration.
+---------------------------------------------------------------------------------------------------
 Version: 0.2.0
 Date: 2026-11-02
   Features:

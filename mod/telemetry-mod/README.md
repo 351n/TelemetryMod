@@ -1,6 +1,6 @@
 # telemetry-mod
 
-Lightweight, runtime-only Factorio 2.0.76+ mod that emits one stable JSON object per telemetry event. JSONL, localhost UDP, and RCON export are independent outputs.
+Lightweight, runtime-only Factorio 2.1 mod that emits one stable JSON object per telemetry event. JSONL, localhost UDP, and RCON export are independent outputs. Version 0.3.0 targets Factorio 2.1 and was tested on 2.1.24; use version 0.2.0 for Factorio 2.0.76–2.0.x.
 
 **Overview**
 - Records small telemetry events (examples: `join`, `leave`, `desync`, `afk`, `death`, `research`, `evolution`) and can expose them through JSON Lines, UDP, or RCON.
@@ -28,7 +28,7 @@ Lightweight, runtime-only Factorio 2.0.76+ mod that emits one stable JSON object
   - Speaker notify max events per scan: 5
   - Max buffered bytes: 50 KB (the mod bounds the file by size)
   - Max entry age: 24 hours
-- The mod stores bounded, already-encoded JSON lines in `global.telemetry_buffer`. JSONL writes the current buffer; RCON returns its newest entries. UDP sends the current event immediately and does not retry.
+- The mod stores bounded, already-encoded JSON lines in `storage.telemetry_buffer`. JSONL writes the current buffer; RCON returns its newest entries. UDP sends the current event immediately and does not retry.
 - If the runtime environment lacks a write backend, `control.lua` detects this (`detect_write_backend`) and falls back to the best available approach or no-op.
 - Speaker telemetry setup: enable the runtime setting `telemetry-speaker-notify-enabled`, then open a `programmable-speaker` and use the mod GUI checkbox (`Send telemetry from this speaker`). The speaker still needs `show alert` enabled, a circuit condition (`if <signal> ...`) and optional `alert message` (used as telemetry text).
 
@@ -86,8 +86,8 @@ remote.call("telemetry_mod", "notify", {
 - The mod includes localization files under `locale/` (`en` and `pl`). Update translations in the appropriate locale files.
 
 **Release / Mod Portal**
-- Before publishing, install Node.js 20+ dependencies with `npm ci --prefix examples`, then run `pwsh -File scripts/test_factorio.ps1` from the repository root with PowerShell 7 and Factorio 2.0.77 installed. The isolated test exercises JSONL/UDP/RCON, runtime settings, local UDP-to-Discord webhook integration, and ZIP contents. Pass `-FactorioExe <path>` if Factorio is installed elsewhere.
-- Run `pwsh -File scripts/test_upgrade.ps1` to create a save with the actual 0.1.11 source at Git commit `1f7eda2` and load it with the current mod. This test requires that reference commit to exist locally.
+- Before publishing, install Node.js 20+ dependencies with `npm ci --prefix examples`, then run `pwsh -File scripts/test_factorio.ps1` from the repository root with PowerShell 7 and Factorio 2.1.24 installed. The isolated test exercises JSONL/UDP/RCON, save/load, runtime settings, speaker APIs, local UDP-to-Discord webhook integration, and ZIP contents. Pass `-FactorioExe <path>` if Factorio is installed elsewhere.
+- Run `pwsh -File scripts/test_upgrade.ps1 -LegacySave <path-to-2.0-save.zip>` to load a copy of a Factorio 2.0 save. Optionally pass `-ExpectedSource <name>` to check that an existing telemetry event is retained and visible through the RCON adapter. The original save is not modified.
 - The [repository release materials](https://github.com/351n/TelemetryMod/tree/main/mod) include portal copy and the release checklist; these are outside the distributable ZIP.
 - `pack-mod.ps1` writes `dist/telemetry-mod_<version>.zip`; the archive contains exactly one versioned mod root and excludes local saves, logs, test files, and development metadata.
 

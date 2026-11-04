@@ -53,10 +53,10 @@ function M.new(opts)
   end
 
   local function ensure_state_table()
-    if not global then return nil end
-    global.telemetry_notify_state = global.telemetry_notify_state or {}
-    global.telemetry_notify_state.speakers = global.telemetry_notify_state.speakers or {}
-    return global.telemetry_notify_state.speakers
+    if not storage then return nil end
+    storage.telemetry_notify_state = storage.telemetry_notify_state or {}
+    storage.telemetry_notify_state.speakers = storage.telemetry_notify_state.speakers or {}
+    return storage.telemetry_notify_state.speakers
   end
 
   local function should_emit_for_speaker(entity, state, cfg, tick, unit_key)
