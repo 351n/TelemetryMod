@@ -108,7 +108,7 @@ end)
   if ($create.ExitCode -ne 0) { throw 'Factorio smoke-save creation failed.' }
 
   $log = Get-Content -Raw -LiteralPath (Join-Path $testRoot 'factorio-current.log')
-  if ($log -notmatch 'Factorio 2\.0\.77') { throw 'The test runtime is not Factorio 2.0.77.' }
+  if ($log -notmatch 'Factorio 2\.1\.24') { throw 'The test runtime is not Factorio 2.1.24.' }
   if ($log -notmatch 'TELEMETRY_SMOKE PASS') { throw 'Lua output smoke checks did not complete.' }
   $jsonl = Get-Content -LiteralPath (Join-Path $testRoot 'script-output\telemetry.jsonl') | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.source -eq 'smoke' }
   if ($jsonl.Count -ne 1 -or $jsonl[0].type -ne 'notify') { throw 'JSONL output contract check failed.' }
@@ -131,6 +131,7 @@ end)
     $deadline = (Get-Date).AddSeconds(30)
     do {
       try {
+        $loadedSnapshot = Invoke-RconCommand '/telemetry-export 100'
         $emit = '/c remote.call("telemetry_mod", "notify", {source="smoke-rcon", severity="warning", message="rcon smoke"})'
         Invoke-RconCommand $emit | Out-Null
         Invoke-RconCommand $emit | Out-Null
@@ -142,6 +143,8 @@ end)
       }
     } while ((Get-Date) -lt $deadline)
     if (-not $response) { throw 'RCON server did not become available.' }
+    $loadedJson = $loadedSnapshot | ConvertFrom-Json
+    if ($loadedJson.schema -ne 'telemetry-rcon/v1' -or @($loadedJson.events | Where-Object { $_.source -eq 'smoke' }).Count -ne 1) { throw 'Telemetry buffer did not survive save/load.' }
     $rconJson = $response | ConvertFrom-Json
     if ($rconJson.schema -ne 'telemetry-rcon/v1' -or $rconJson.events.Count -gt 1 -or $rconJson.events[0].source -ne 'smoke-rcon') { throw 'RCON export contract check failed.' }
     if (-not $udpTask.Wait(30000)) { throw 'UDP datagram was not received within 30 seconds.' }
@@ -211,8 +214,23 @@ end)
       }
     }
   } finally { $archive.Dispose() }
+
+  # Load the actual release archive in a clean profile, not just the source copy.
+  $zipRoot = Join-Path $testRoot 'zip-profile'
+  $zipMods = Join-Path $zipRoot 'mods'
+  New-Item -ItemType Directory -Path $zipMods -Force | Out-Null
+  Copy-Item -LiteralPath $zip -Destination $zipMods
+  '{"mods":[{"name":"base","enabled":true},{"name":"telemetry-mod","enabled":true}]}' | Set-Content -LiteralPath (Join-Path $zipMods 'mod-list.json') -Encoding utf8NoBOM
+  $zipConfig = Join-Path $zipRoot 'config.ini'
+  $zipWritePath = $zipRoot.Replace('\', '/')
+  @('; version=13', '[path]', "read-data=$dataPath", "write-data=$zipWritePath") | Set-Content -LiteralPath $zipConfig -Encoding utf8NoBOM
+  $zipSave = Join-Path $zipRoot 'zip-smoke.zip'
+  $zipGame = Start-Process -FilePath $FactorioExe -ArgumentList @('--config', "`"$zipConfig`"", '--mod-directory', "`"$zipMods`"", '--create', "`"$zipSave`"") -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput (Join-Path $zipRoot 'create.log') -RedirectStandardError (Join-Path $zipRoot 'create-error.log')
+  if ($zipGame.ExitCode -ne 0) { throw 'Factorio could not create a save with the packaged ZIP.' }
+  $zipLog = Get-Content -Raw -LiteralPath (Join-Path $zipRoot 'factorio-current.log')
+  if ($zipLog -notmatch 'Factorio 2\.1\.24' -or $zipLog -notmatch "telemetry-mod $([regex]::Escape($releaseInfo.version))" -or $zipLog -notmatch 'Checksum for script __telemetry-mod__/control.lua') { throw 'Factorio did not load the expected packaged mod.' }
   $passed = $true
-  Write-Host 'TelemetryMod Factorio 2.0.77 smoke test passed.'
+  Write-Host 'TelemetryMod Factorio 2.1.24 smoke test passed.'
 } finally {
   if ($receiver) { $receiver.Dispose() }
   if ($discordReceiver -and -not $discordReceiver.HasExited) { Stop-Process -Id $discordReceiver.Id -Force }

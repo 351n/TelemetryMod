@@ -1,7 +1,5 @@
--- Factorio 2.0+: persistent mod state lives in the `storage` table (it was called `global` before 2.0).
--- This mod code still uses `global` internally, so we alias it to `storage` when running on 2.0.
-if not global and storage then global = storage end
--- luacheck: globals game script remote defines rendering commands global storage helpers log rcon
+-- Factorio 2.1 persistent mod state lives in the runtime `storage` table.
+-- luacheck: globals game script remote defines rendering commands storage helpers log rcon
 
 -- ...existing code...
 -- telemetry-mod: runtime-only telemetry logger
@@ -118,9 +116,9 @@ local function parse_surface_list(raw)
 end
 
 local function ensure_notify_state()
-  if not global then return nil end
-  global.telemetry_notify_state = global.telemetry_notify_state or {}
-  local st = global.telemetry_notify_state
+  if not storage then return nil end
+  storage.telemetry_notify_state = storage.telemetry_notify_state or {}
+  local st = storage.telemetry_notify_state
   st.speakers = st.speakers or {}
   st.speaker_enabled = st.speaker_enabled or {}
   st.speaker_gui_players = st.speaker_gui_players or {}
@@ -606,16 +604,16 @@ local function on_entity_settings_pasted(event)
 end
 
 local function ensure_runtime_state()
-  if not global then return end
-  global.telemetry_buffer = global.telemetry_buffer or { entries = {}, total_bytes = 0 }
-  global.tech_translation_cache = global.tech_translation_cache or {}
-  global.entity_translation_cache = global.entity_translation_cache or {}
-  global.pending_research_translations = global.pending_research_translations or {}
-  global.pending_death_translations = global.pending_death_translations or {}
-  global.pending_evolution_translations = global.pending_evolution_translations or {}
-  global.telemetry_afk_state = global.telemetry_afk_state or {}
+  if not storage then return end
+  storage.telemetry_buffer = storage.telemetry_buffer or { entries = {}, total_bytes = 0 }
+  storage.tech_translation_cache = storage.tech_translation_cache or {}
+  storage.entity_translation_cache = storage.entity_translation_cache or {}
+  storage.pending_research_translations = storage.pending_research_translations or {}
+  storage.pending_death_translations = storage.pending_death_translations or {}
+  storage.pending_evolution_translations = storage.pending_evolution_translations or {}
+  storage.telemetry_afk_state = storage.telemetry_afk_state or {}
   ensure_notify_state()
-  global.telemetry_evolution = global.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
+  storage.telemetry_evolution = storage.telemetry_evolution or { last_checked_factor = nil, last_logged_factor = nil }
 end
 
 local function baseline_observed_evolution(trigger_name)
@@ -681,8 +679,8 @@ apply_settings = function()
   SPEAKER_NOTIFY_COOLDOWN_TICKS = math.max(1, math.floor(speaker_cooldown_secs)) * 60
   local speaker_max_events = tonumber(read_setting("telemetry-speaker-notify-max-events-per-poll", DEFAULT_SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL)) or DEFAULT_SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL
   SPEAKER_NOTIFY_MAX_EVENTS_PER_POLL = math.max(1, math.floor(speaker_max_events))
-  if global and not SPEAKER_NOTIFY_ENABLED and global.telemetry_notify_state then
-    global.telemetry_notify_state.speakers = {}
+  if storage and not SPEAKER_NOTIFY_ENABLED and storage.telemetry_notify_state then
+    storage.telemetry_notify_state.speakers = {}
   end
 
   -- Avoid leaving stale nth_tick handlers behind
@@ -696,7 +694,7 @@ apply_settings = function()
   end
 
   -- If the observed force changed, baseline the evolution state (prevents retro-trigger spam).
-  if global and (old_force_name ~= EVOLUTION_FORCE_NAME or old_surface_names_str ~= EVOLUTION_SURFACE_NAMES_STR) then
+  if storage and (old_force_name ~= EVOLUTION_FORCE_NAME or old_surface_names_str ~= EVOLUTION_SURFACE_NAMES_STR) then
     pcall(function()
       baseline_observed_evolution("config")
     end)

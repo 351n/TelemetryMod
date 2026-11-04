@@ -67,13 +67,13 @@ function M.new(opts)
       end
 
       if info.technology_localised and translator.request_translation then
-        global.pending_research_translations = global.pending_research_translations or {}
+        storage.pending_research_translations = storage.pending_research_translations or {}
         local id = nil
         local ok = pcall(function()
           id = translator.request_translation(info.technology_localised)
         end)
         if ok and id then
-          global.pending_research_translations[id] = {
+          storage.pending_research_translations[id] = {
             tick = tick,
             request_tick = tick,
             technology = tech_name,

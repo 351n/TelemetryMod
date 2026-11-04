@@ -8,7 +8,7 @@ Telemetry Mod
 
 ## Short summary
 
-Runtime telemetry for Factorio 2.0.76+: compatible JSONL, localhost UDP, and on-demand RCON export.
+Runtime telemetry for Factorio 2.1: compatible JSONL, localhost UDP, and on-demand RCON export.
 
 ## Full description
 
@@ -31,7 +31,7 @@ Each output is independently configurable at runtime. Turning JSONL off means th
 
 ### Requirements and compatibility
 
-- Factorio **2.0.76 or newer** (the current release was tested on 2.0.77).
+- Factorio **2.1**; version 0.3.0 was tested on 2.1.24. For Factorio 2.0.76–2.0.x, use Telemetry Mod 0.2.0.
 - No data stage changes and no required dependencies beyond base Factorio.
 - UDP is deliberately localhost-only and requires the explicit Factorio startup flag above.
 - RCON must be enabled and secured by the server operator. Treat exported telemetry as operator data.

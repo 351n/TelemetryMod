@@ -12,8 +12,8 @@ Use this list for each public Telemetry Mod release.
 
 ## Verify
 
-- [ ] Install the example dependencies with `npm ci --prefix examples`, then run `pwsh -File scripts/test_factorio.ps1` with PowerShell 7 and Factorio 2.0.77.
-- [ ] Run `pwsh -File scripts/test_upgrade.ps1` to create a 0.1.11 save from the reference commit and load it using the current mod.
+- [ ] Install the example dependencies with `npm ci --prefix examples`, then run `pwsh -File scripts/test_factorio.ps1` with PowerShell 7 and Factorio 2.1.24.
+- [ ] Run `pwsh -File scripts/test_upgrade.ps1 -LegacySave <path-to-2.0-save.zip>` against an isolated copy of a Factorio 2.0 save; use `-ExpectedSource <name>` when a known buffered event should be verified.
 - [ ] Verify a new save, an existing save, save/load, runtime-setting changes, and both English and Polish in-game text when relevant.
 - [ ] Inspect the produced ZIP: one `telemetry-mod_<version>/` root; `info.json`, `changelog.txt`, thumbnail, and both locales present; no tests, logs, saves, profiles, or editor metadata.
 - [ ] Confirm the Discord relay still consumes JSONL unchanged if JSONL compatibility is part of the release.

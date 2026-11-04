@@ -40,17 +40,17 @@ function M.new(opts)
         write_json_line(line, not debug_afk)
 
         if afk_info_enabled and game.print then
-          global.telemetry_afk_state = global.telemetry_afk_state or {}
-          local st = global.telemetry_afk_state[player.index] or { is_afk = false }
+          storage.telemetry_afk_state = storage.telemetry_afk_state or {}
+          local st = storage.telemetry_afk_state[player.index] or { is_afk = false }
           if (not st.is_afk) and afk_seconds >= afk_info_threshold_seconds then
             st.is_afk = true
-            global.telemetry_afk_state[player.index] = st
+            storage.telemetry_afk_state[player.index] = st
             pcall(function()
               game.print(with_prefix({ "telemetry-mod.afk-on", player.name or "unknown", tostring(afk_seconds) }))
             end)
           elseif st.is_afk and afk_seconds <= afk_info_return_seconds then
             st.is_afk = false
-            global.telemetry_afk_state[player.index] = st
+            storage.telemetry_afk_state[player.index] = st
             pcall(function()
               game.print(with_prefix({ "telemetry-mod.afk-off", player.name or "unknown" }))
             end)

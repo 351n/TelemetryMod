@@ -14,11 +14,11 @@ function M.new(opts)
   local last_jsonl_error = nil
 
   local function ensure_buffer()
-    if not global then return nil end
-    global.telemetry_buffer = global.telemetry_buffer or { entries = {}, total_bytes = 0 }
-    global.telemetry_buffer.entries = global.telemetry_buffer.entries or {}
-    global.telemetry_buffer.total_bytes = global.telemetry_buffer.total_bytes or 0
-    return global.telemetry_buffer
+    if not storage then return nil end
+    storage.telemetry_buffer = storage.telemetry_buffer or { entries = {}, total_bytes = 0 }
+    storage.telemetry_buffer.entries = storage.telemetry_buffer.entries or {}
+    storage.telemetry_buffer.total_bytes = storage.telemetry_buffer.total_bytes or 0
+    return storage.telemetry_buffer
   end
 
   local function prune_buffer(buffer, cfg)
