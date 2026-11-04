@@ -1,12 +1,14 @@
 {
   "name": "telemetry-mod",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "title": "Telemetry Mod",
-  "author": "auto-generated",
-  "description": "Runtime-only mod that logs telemetry events (join/leave/afk/research/death) to script-output/telemetry.jsonl (one JSON object per line).",
+  "author": "Kamil Szydłowski",
+  "description": "Runtime-only telemetry mod with independently configurable JSONL, localhost UDP, and RCON export outputs.",
+  "homepage": "https://github.com/351n/TelemetryMod",
+  "contact": "https://github.com/351n/TelemetryMod/issues",
   "factorio_version": "2.0",
   "dependencies": [
-    "base >= 2.0",
+    "base >= 2.0.76",
     "? RampantFixed"
   ]
 }

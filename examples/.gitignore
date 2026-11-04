@@ -1,0 +1,4 @@
+node_modules/
+**/.env
+**/relay_state.json
+**/config.json

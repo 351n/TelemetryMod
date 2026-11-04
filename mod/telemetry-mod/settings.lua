@@ -8,6 +8,45 @@ data:extend({
     order = "a"
   },
   {
+    type = "bool-setting",
+    name = "telemetry-output-jsonl-enabled",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "a-a"
+  },
+  {
+    type = "bool-setting",
+    name = "telemetry-output-udp-enabled",
+    setting_type = "runtime-global",
+    default_value = false,
+    order = "a-b"
+  },
+  {
+    type = "int-setting",
+    name = "telemetry-udp-port",
+    setting_type = "runtime-global",
+    default_value = 34199,
+    minimum_value = 1,
+    maximum_value = 65535,
+    order = "a-c"
+  },
+  {
+    type = "bool-setting",
+    name = "telemetry-output-rcon-enabled",
+    setting_type = "runtime-global",
+    default_value = false,
+    order = "a-d"
+  },
+  {
+    type = "int-setting",
+    name = "telemetry-rcon-window-events",
+    setting_type = "runtime-global",
+    default_value = 100,
+    minimum_value = 1,
+    maximum_value = 1000,
+    order = "a-e"
+  },
+  {
     type = "int-setting",
     name = "telemetry-afk-interval-seconds",
     setting_type = "runtime-global",

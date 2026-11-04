@@ -1,2 +1,2 @@
 Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """REPLACE WITH PATH TO NODE.EXE"" ""REPLACE WITH PATH TO RELAY.JS""", 0, False
+WshShell.Run """C:\Program Files\nodejs\node.exe"" ""F:\Git\anyZyzol\bot\src\relay.js""", 0, False

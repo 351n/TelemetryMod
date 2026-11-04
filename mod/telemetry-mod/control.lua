@@ -1,7 +1,7 @@
 -- Factorio 2.0+: persistent mod state lives in the `storage` table (it was called `global` before 2.0).
 -- This mod code still uses `global` internally, so we alias it to `storage` when running on 2.0.
 if not global and storage then global = storage end
--- luacheck: globals game script remote defines rendering commands global storage helpers log
+-- luacheck: globals game script remote defines rendering commands global storage helpers log rcon
 
 -- ...existing code...
 -- telemetry-mod: runtime-only telemetry logger
@@ -18,6 +18,11 @@ local DEFAULT_AFK_INFO_THRESHOLD_SECONDS = 300
 local DEFAULT_AFK_INFO_RETURN_SECONDS = 60
 local DEFAULT_MAX_BYTES = 50 * 1024 -- 50 KB
 local DEFAULT_MAX_AGE_SECONDS = 24 * 60 * 60 -- 24 hours
+local DEFAULT_JSONL_ENABLED = true
+local DEFAULT_UDP_ENABLED = false
+local DEFAULT_UDP_PORT = 34199
+local DEFAULT_RCON_ENABLED = false
+local DEFAULT_RCON_WINDOW_EVENTS = 100
 
 -- Evolution telemetry + alerts
 local DEFAULT_EVOLUTION_ENABLED = true
@@ -41,6 +46,11 @@ local AFK_INFO_THRESHOLD_SECONDS = DEFAULT_AFK_INFO_THRESHOLD_SECONDS
 local AFK_INFO_RETURN_SECONDS = DEFAULT_AFK_INFO_RETURN_SECONDS
 local MAX_BYTES = DEFAULT_MAX_BYTES
 local MAX_AGE_SECONDS = DEFAULT_MAX_AGE_SECONDS
+local JSONL_ENABLED = DEFAULT_JSONL_ENABLED
+local UDP_ENABLED = DEFAULT_UDP_ENABLED
+local UDP_PORT = DEFAULT_UDP_PORT
+local RCON_ENABLED = DEFAULT_RCON_ENABLED
+local RCON_WINDOW_EVENTS = DEFAULT_RCON_WINDOW_EVENTS
 
 local EVOLUTION_ENABLED = DEFAULT_EVOLUTION_ENABLED
 local EVOLUTION_INTERVAL_TICKS = DEFAULT_EVOLUTION_INTERVAL_SECONDS * 60
@@ -74,7 +84,8 @@ local evolution_event_runtime = require("runtime.events.evolution")
 local speaker_notify_runtime = require("runtime.events.speaker_notify")
 local speaker_gui_runtime = require("runtime.events.speaker_gui")
 local write_backend_runtime = require("runtime.write_backend")
-local jsonl_buffer_runtime = require("runtime.jsonl_buffer")
+local udp_backend_runtime = require("runtime.udp_backend")
+local telemetry_outputs_runtime = require("runtime.telemetry_outputs")
 local translation_runtime = require("runtime.translation_runtime")
 local death_telemetry_runtime = require("runtime.events.death")
 local research_telemetry_runtime = require("runtime.events.research")
@@ -167,6 +178,12 @@ local function safe_log(msg)
   end)
 end
 
+local function safe_warning_log(message)
+  pcall(function()
+    if log then log("[telemetry-mod] " .. tostring(message)) end
+  end)
+end
+
 -- Custom event raised when evolution crosses a threshold.
 -- Other mods can subscribe via:
 --   local id = remote.call("telemetry_mod","get_evolution_event_id")
@@ -227,13 +244,17 @@ end)
 
 local write_backend = write_backend_runtime.new()
 local write_file_safe = write_backend.write_file_safe
+local udp_backend = udp_backend_runtime.new()
+local send_udp_safe = udp_backend.send_udp_safe
 
 local function ensure_telemetry_writer()
   if telemetry_writer then return telemetry_writer end
-  telemetry_writer = jsonl_buffer_runtime.new({
+  telemetry_writer = telemetry_outputs_runtime.new({
     write_file_safe = write_file_safe,
+    send_udp_safe = send_udp_safe,
     safe_game_print = safe_game_print,
     safe_log = safe_log,
+    warning_log = safe_warning_log,
     get_tick = function()
       return (game and game.tick) or 0
     end,
@@ -242,6 +263,11 @@ local function ensure_telemetry_writer()
         log_file = LOG_FILE,
         max_bytes = MAX_BYTES,
         max_age_seconds = MAX_AGE_SECONDS,
+        jsonl_enabled = JSONL_ENABLED,
+        udp_enabled = UDP_ENABLED,
+        udp_port = UDP_PORT,
+        rcon_enabled = RCON_ENABLED,
+        rcon_window_events = RCON_WINDOW_EVENTS,
         default_max_bytes = DEFAULT_MAX_BYTES,
         default_max_age_seconds = DEFAULT_MAX_AGE_SECONDS
       }
@@ -252,7 +278,7 @@ end
 
 local function write_json_line(line, suppress_debug)
   local writer = ensure_telemetry_writer()
-  writer.write_json_line(line, suppress_debug)
+  writer.record(line, suppress_debug)
 end
 
 local function ensure_notify_api()
@@ -608,6 +634,11 @@ end
 
 apply_settings = function()
   LOG_FILE = tostring(read_setting("telemetry-log-file", DEFAULT_LOG_FILE) or DEFAULT_LOG_FILE)
+  JSONL_ENABLED = read_setting("telemetry-output-jsonl-enabled", DEFAULT_JSONL_ENABLED) == true
+  UDP_ENABLED = read_setting("telemetry-output-udp-enabled", DEFAULT_UDP_ENABLED) == true
+  UDP_PORT = math.max(1, math.min(65535, math.floor(tonumber(read_setting("telemetry-udp-port", DEFAULT_UDP_PORT)) or DEFAULT_UDP_PORT)))
+  RCON_ENABLED = read_setting("telemetry-output-rcon-enabled", DEFAULT_RCON_ENABLED) == true
+  RCON_WINDOW_EVENTS = math.max(1, math.min(1000, math.floor(tonumber(read_setting("telemetry-rcon-window-events", DEFAULT_RCON_WINDOW_EVENTS)) or DEFAULT_RCON_WINDOW_EVENTS)))
 
   -- AFK polling interval
   local secs = tonumber(read_setting("telemetry-afk-interval-seconds", DEFAULT_AFK_INTERVAL_SECONDS)) or DEFAULT_AFK_INTERVAL_SECONDS
@@ -672,6 +703,25 @@ apply_settings = function()
   end
 end
 
+local function telemetry_export_command(command)
+  if command and command.player_index then
+    local player = game and game.get_player(command.player_index)
+    if player then player.print({ "telemetry-mod.rcon-player-only" }) end
+    return
+  end
+
+  local response = ensure_telemetry_writer().rcon_response(command and command.parameter)
+  pcall(function()
+    if rcon and rcon.print then rcon.print(response) end
+  end)
+end
+
+local function register_rcon_command()
+  pcall(function()
+    commands.add_command("telemetry-export", { "telemetry-mod.rcon-command-help" }, telemetry_export_command)
+  end)
+end
+
 local function is_telemetry_setting(name)
   return string.find(name or "", "telemetry-") ~= nil
 end
@@ -701,7 +751,7 @@ local function ensure_lifecycle_api()
     get_evolution_interval_ticks = function() return EVOLUTION_INTERVAL_TICKS end,
     ensure_runtime_state = ensure_runtime_state,
     baseline_init_evolution = function() baseline_observed_evolution("init") end,
-    clear_log_file = function() return write_file_safe(LOG_FILE, "", false) end,
+    clear_log_file = function() return ensure_telemetry_writer().clear_jsonl_file() end,
     apply_settings = function() apply_settings() end,
     is_telemetry_setting = is_telemetry_setting,
     safe_game_print = safe_game_print,
@@ -711,3 +761,4 @@ local function ensure_lifecycle_api()
 end
 
 ensure_lifecycle_api().register()
+register_rcon_command()
