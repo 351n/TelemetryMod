@@ -1,0 +1,11 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.2.0
+Date: 2026-11-02
+  Features:
+    - Added independently configurable JSONL, localhost UDP, and RCON telemetry outputs.
+    - Added /telemetry-export [limit] for bounded RCON snapshots of recent telemetry events.
+  Changes:
+    - Telemetry now requires Factorio 2.0.76 or newer within the 2.0 release line.
+    - Added release packaging validation and Mod Portal publication material.
+  Bugfixes:
+    - JSONL write failures no longer prevent independent UDP delivery.

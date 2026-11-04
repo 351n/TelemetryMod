@@ -1,15 +1,16 @@
 <#
   pack-mod.ps1
-  Simple PowerShell helper to create a ZIP of a Factorio mod folder using name and version from info.json
+  Release packer for a Factorio mod. It reads name and version from info.json,
+  stages only distributable files, then creates a Mod Portal-ready ZIP.
 
   Usage (PowerShell):
-    .\pack-mod.ps1 -ModDir ".\telemetry-mod_0.1.0" -OutDir ".\dist"
+    .\pack-mod.ps1 -ModDir ".\telemetry-mod" -OutDir ".\dist"
 
   The script will create <OutDir> if missing and write <name>_<version>.zip there.
 #>
 
 param(
-  [string]$ModDir = ".\telemetry-mod_0.1.0",
+  [string]$ModDir = ".\telemetry-mod",
   [string]$OutDir = ".\dist"
 )
 
@@ -43,12 +44,44 @@ $dest = Join-Path $OutDir $zipName
 
 if (Test-Path -Path $dest) { Remove-Item -Path $dest -Force }
 
-# Compress-Archive expects a file/path pattern; include all files/folders inside the mod directory
+$sourceRoot = (Resolve-Path -LiteralPath $ModDir).Path
+$stageRoot = Join-Path ([IO.Path]::GetTempPath()) ("factorio-mod-package-" + [guid]::NewGuid().ToString('N'))
+$packageRoot = "${name}_${version}"
+$stageMod = Join-Path $stageRoot $packageRoot
+
+function Test-ExcludedReleaseFile {
+  param([string]$RelativePath)
+
+  $normalized = $RelativePath.Replace('\', '/')
+  return $normalized -match '(^|/)(?:\.git|\.svn|\.vscode|\.codex|node_modules|tests?|spec|coverage)(/|$)' -or
+    $normalized -match '(^|/)(?:mod-list\.json|mod-settings\.dat|player-data\.json|server-settings\.json|factorio-(?:current|previous)\.log)$' -or
+    $normalized -match '\.(?:zip|log|tmp|bak|sav|save)$'
+}
+
 try {
-  # Include the mod folder itself so the zip contains a top-level folder like "telemetry-mod_0.1.0"
-  Compress-Archive -Path $ModDir -DestinationPath $dest -Force
+  New-Item -ItemType Directory -Path $stageMod -Force | Out-Null
+  foreach ($file in Get-ChildItem -LiteralPath $sourceRoot -Recurse -File) {
+    $relative = $file.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
+    if (Test-ExcludedReleaseFile $relative) { continue }
+
+    $stagedFile = Join-Path $stageMod $relative
+    $stagedParent = Split-Path -Parent $stagedFile
+    if (-not (Test-Path -LiteralPath $stagedParent)) {
+      New-Item -ItemType Directory -Path $stagedParent -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $file.FullName -Destination $stagedFile -Force
+  }
+
+  if (-not (Test-Path -LiteralPath (Join-Path $stageMod 'info.json') -PathType Leaf)) {
+    throw 'Staging omitted info.json.'
+  }
+
+  Compress-Archive -Path $stageMod -DestinationPath $dest -Force
   Write-Host "Created package: $dest"
-  exit 0
 } catch {
   Write-ErrAndExit "Failed to create zip: $_"
+} finally {
+  if (Test-Path -LiteralPath $stageRoot) {
+    Remove-Item -LiteralPath $stageRoot -Recurse -Force
+  }
 }

@@ -1,0 +1,9 @@
+{
+  "udpPort": 34199,
+  "obs": { "url": "ws://127.0.0.1:4455", "password": "" },
+  "actions": {
+    "afk": { "enabled": false, "player": "PlayerName", "thresholdSeconds": 300, "returnSeconds": 60, "scene": "AFK", "returnScene": "Game" },
+    "death": { "enabled": false, "scene": "Game", "source": "Death alert", "durationMs": 5000 },
+    "research": { "enabled": false, "scene": "Game", "source": "Research alert", "durationMs": 5000 }
+  }
+}

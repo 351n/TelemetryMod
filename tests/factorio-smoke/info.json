@@ -1,0 +1,8 @@
+{
+  "name": "telemetry-smoke",
+  "version": "0.1.0",
+  "title": "Telemetry Mod Smoke Tests",
+  "author": "TelemetryMod test suite",
+  "factorio_version": "2.0",
+  "dependencies": ["base >= 2.0.76", "telemetry-mod"]
+}
